@@ -1,0 +1,27 @@
+# Perfil para una VM o usuario secundario sin explorer.exe.
+# No modifica Winlogon y requiere iniciar con --without-explorer.
+
+[terminal]
+command = "wezterm-gui.exe"
+file_manager_arguments = "start --always-new-process --"
+command_shell = "powershell.exe"
+command_arguments = "start --always-new-process -- {shell} -NoExit -Command"
+
+[file_manager]
+command = "yazi.exe"
+
+[launcher]
+enabled = true
+command = ""
+
+[applications]
+browser = "brave.exe"
+
+[hotkeys]
+# Win+Enter permanece reservado por Windows incluso sin Explorer.
+terminal = "Ctrl+Alt+Enter"
+files = "Win+E"
+launcher = "Ctrl+Alt+Space"
+browser = "Win+B"
+close_window = "Win+Q"
+recovery = "Ctrl+Alt+Shift+E"

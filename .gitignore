@@ -1,0 +1,17 @@
+bin/
+obj/
+.vs/
+.idea/
+
+# Logs y datos locales de ejecución
+logs/*.log
+logs/**/*.log
+*.user
+*.suo
+
+# Salidas de publicación
+publish/
+
+# Instrucciones y documentación local del entorno Codex
+AGENTS.md
+mds/
