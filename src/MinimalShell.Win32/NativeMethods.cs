@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace MinimalShell.Win32;
 
@@ -14,6 +15,9 @@ internal static class NativeMethods
     internal const uint WM_CHAR = 0x0102;
     internal const uint WM_KEYDOWN = 0x0100;
     internal const uint WM_ERASEBKGND = 0x0014;
+    internal const uint WM_TIMER = 0x0113;
+    internal const uint WM_NCHITTEST = 0x0084;
+    internal const uint WM_MOUSEACTIVATE = 0x0021;
 
     internal const uint MOD_ALT = 0x0001;
     internal const uint MOD_CONTROL = 0x0002;
@@ -28,13 +32,21 @@ internal static class NativeMethods
     internal const int VK_DOWN = 0x28;
 
     internal const uint SW_SHOW = 5;
+    internal const uint SW_SHOWNOACTIVATE = 4;
     internal const uint SW_HIDE = 0;
+    internal const uint SW_MAXIMIZE = 3;
+    internal const uint SW_RESTORE = 9;
+    internal const uint SWP_NOZORDER = 0x0004;
+    internal const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+    internal const uint MONITOR_DEFAULTTOPRIMARY = 0x00000001;
     internal const uint SWP_NOSIZE = 0x0001;
     internal const uint SWP_NOACTIVATE = 0x0010;
     internal const uint SWP_SHOWWINDOW = 0x0040;
     internal const uint SWP_HIDEWINDOW = 0x0080;
     internal const uint TRANSPARENT = 1;
     internal const int COLOR_WINDOW = 5;
+    internal const int HTTRANSPARENT = -1;
+    internal const int MA_NOACTIVATE = 3;
 
     internal static readonly IntPtr HWND_TOPMOST = new(-1);
 
@@ -42,6 +54,9 @@ internal static class NativeMethods
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     internal delegate IntPtr WindowProc(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     internal struct WindowClass
@@ -79,6 +94,22 @@ internal static class NativeMethods
         internal int Top;
         internal int Right;
         internal int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct Point
+    {
+        internal int X;
+        internal int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MonitorInfo
+    {
+        internal uint Size;
+        internal Rect Monitor;
+        internal Rect Work;
+        internal uint Flags;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -139,12 +170,37 @@ internal static class NativeMethods
         int height,
         uint flags);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowRect(IntPtr hWnd, out Rect rectangle);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo monitorInfo);
+
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int index);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool InvalidateRect(IntPtr hWnd, IntPtr rectangle, bool erase);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern nuint SetTimer(IntPtr hWnd, nuint timerId, uint milliseconds, IntPtr timerCallback);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool KillTimer(IntPtr hWnd, nuint timerId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetCursorPos(out Point point);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr MonitorFromPoint(Point point, uint flags);
 
     [DllImport("user32.dll")]
     internal static extern IntPtr BeginPaint(IntPtr hWnd, out PaintStruct paintStruct);
@@ -213,6 +269,25 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+
+    internal static string GetWindowClassName(IntPtr hWnd)
+    {
+        var className = new StringBuilder(256);
+        return GetClassName(hWnd, className, className.Capacity) > 0
+            ? className.ToString()
+            : string.Empty;
+    }
 
     [DllImport("user32.dll")]
     internal static extern void PostQuitMessage(int exitCode);

@@ -1,4 +1,4 @@
-# Checklist manual — MVP 0.1
+# Checklist manual — MVP 0.5
 
 Ejecutar estas pruebas en Windows 11 Pro. Antes de comenzar, confirmar que `wezterm-gui.exe`, `yazi.exe` y el navegador indicado en TOML están disponibles.
 
@@ -12,6 +12,25 @@ dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- config/Mini
 
 El perfil normal usa `Ctrl+Alt+Enter`, `Ctrl+Alt+E`, `Ctrl+Alt+Space`, `Ctrl+Alt+B` y `Ctrl+Alt+Q` para no competir con atajos reservados de Windows.
 
+## Diagnóstico y release — Hito 0.5
+
+Antes de iniciar una sesión de prueba, ejecutar:
+
+```powershell
+dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --check config/MinimalShell.example.toml
+```
+
+El comando no registra hotkeys, no inicia ventanas y no detiene Explorer. Debe mostrar `[OK]` para WezTerm, PowerShell, Yazi y el navegador configurado. Si una dependencia no está instalada, corregirla o confirmar que la advertencia es esperada.
+
+Para generar artefactos reproducibles:
+
+```powershell
+.\scripts\publish.ps1 -Configuration Debug
+.\scripts\publish.ps1 -Configuration Release
+```
+
+Verificar que existan `publish/Debug/win-x64/MinimalShell.dll`, `publish/Release/win-x64/MinimalShell.dll` y ambos archivos TOML de ejemplo. Probar cada publicación con `--check` antes de iniciar el perfil normal.
+
 ## Perfil normal
 
 - [ ] Confirmar que existe un log en `%LOCALAPPDATA%\MinimalShell\logs\minimalshell.log`.
@@ -20,6 +39,14 @@ El perfil normal usa `Ctrl+Alt+Enter`, `Ctrl+Alt+E`, `Ctrl+Alt+Space`, `Ctrl+Alt
 - [ ] `Ctrl+Alt+E`: abre Yazi en una única ventana de WezTerm.
 - [ ] `Ctrl+Alt+B`: abre el navegador configurado.
 - [ ] `Ctrl+Alt+Q`: cierra Bloc de notas y permite su diálogo normal de guardado cuando corresponde.
+- [ ] `Ctrl+Alt+1` y `Ctrl+Alt+2`: alternan entre dos workspaces sin terminar las aplicaciones.
+- [ ] `Ctrl+Alt+Shift+2`: mueve la ventana activa al workspace 2; al cambiar allí, vuelve a mostrarse y recibe foco.
+- [ ] `Ctrl+Alt+Left/Right/Up/Down`: mueve la ventana activa dentro del área del monitor.
+- [ ] `Ctrl+Alt+Shift+Right/Left`: aumenta y reduce el tamaño sin salir del monitor.
+- [ ] `Ctrl+Alt+M` y `Ctrl+Alt+R`: maximiza y restaura la ventana activa.
+- [ ] `Ctrl+Alt+F`: devuelve el foco a la ventana activa válida.
+- [ ] `Ctrl+Alt+S`: muestra y oculta el panel informativo sin robar el foco; el borde izquierdo lo muestra temporalmente.
+- [ ] El panel refleja el workspace activo y actualiza la hora cada segundo aproximadamente.
 - [ ] `Ctrl+Alt+Shift+E`: inicia Explorer si no estaba ejecutándose.
 - [ ] Cerrar MinimalShell con `Ctrl+C`; confirmar en el log que se liberaron hotkeys y recursos.
 - [ ] Intentar abrir una segunda instancia; confirmar que informa que ya existe una en ejecución.
@@ -51,6 +78,21 @@ dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --session r
 
 - `Win+Enter` está reservado por Windows, incluso sin Explorer; el perfil alternativo usa `Ctrl+Alt+Enter`.
 - Otros `Win+…` pueden ser reservados por Windows o por aplicaciones instaladas; MinimalShell informa cada conflicto en consola y log.
-- MinimalShell no reemplaza permanentemente el shell de Winlogon, no ofrece taskbar, tray, workspaces ni gestión avanzada de ventanas.
+- MinimalShell no reemplaza permanentemente el shell de Winlogon y no ofrece taskbar, tray ni gestión avanzada de ventanas.
 - El catálogo de aplicaciones se limita al Menú Inicio y `shell:AppsFolder`; no busca ejecutables en todo el disco.
-- La ejecución `!comando` abre PowerShell en WezTerm, pero todavía no muestra una pantalla de confirmación independiente dentro del launcher.
+- La ejecución `!comando` abre PowerShell en WezTerm después de confirmar dentro del launcher.
+## Hito 0.4 — Panel informativo
+
+Con MinimalShell ejecutándose y Explorer disponible:
+
+1. Confirma que no aparece ninguna ventana del panel al iniciar.
+2. Pulsa `Ctrl+Alt+S`; debe aparecer un panel de aproximadamente `220x96` en el centro del borde izquierdo.
+3. Verifica que la aplicación activa conserva el foco.
+4. Pulsa nuevamente `Ctrl+Alt+S`; el panel debe ocultarse.
+5. Lleva el cursor a los primeros 4 píxeles del borde izquierdo; el panel debe aparecer.
+6. Aleja el cursor del panel; debe ocultarse automáticamente.
+7. Vuelve a mostrarlo con el hotkey, mueve el cursor y confirma que permanece visible.
+8. Cambia de workspace con los hotkeys configurados y confirma que `Workspace N` se actualiza.
+9. Cierra MinimalShell con `Ctrl+C` y confirma que el panel desaparece sin errores.
+
+Repite la comprobación en una VM o usuario secundario con el perfil `config/MinimalShell.without-explorer.example.toml`.

@@ -87,6 +87,19 @@ public static class HotkeyParser
             return true;
         }
 
+        var namedKeys = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["LEFT"] = 0x25,
+            ["UP"] = 0x26,
+            ["RIGHT"] = 0x27,
+            ["DOWN"] = 0x28
+        };
+
+        if (namedKeys.TryGetValue(value, out virtualKey))
+        {
+            return true;
+        }
+
         if (value.Length >= 2 && value[0] == 'F' && int.TryParse(value[1..], out var functionNumber) && functionNumber is >= 1 and <= 24)
         {
             virtualKey = (uint)(0x70 + functionNumber - 1);

@@ -12,6 +12,12 @@ public sealed class ShellConfiguration
 
     public HotkeyConfiguration Hotkeys { get; init; } = new();
 
+    public WorkspaceHotkeyConfiguration WorkspaceHotkeys { get; init; } = WorkspaceHotkeyConfiguration.CreateDefault();
+
+    public WindowHotkeyConfiguration WindowHotkeys { get; init; } = new();
+
+    public StatusPanelConfiguration StatusPanel { get; init; } = new();
+
     public static ShellConfiguration CreateDefault() => new();
 }
 
@@ -56,4 +62,19 @@ public sealed class HotkeyConfiguration
     public string CloseWindow { get; init; } = "Win+Q";
 
     public string Recovery { get; init; } = "Ctrl+Alt+Shift+E";
+}
+
+public sealed class StatusPanelConfiguration
+{
+    public bool Enabled { get; init; } = true;
+
+    public string Hotkey { get; init; } = "Ctrl+Alt+S";
+
+    public int Width { get; init; } = 220;
+
+    public int Height { get; init; } = 96;
+
+    public int EdgeZone { get; init; } = 4;
+
+    public string Monitor { get; init; } = "primary";
 }

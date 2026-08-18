@@ -17,6 +17,14 @@ command = ""
 [applications]
 browser = "brave.exe"
 
+[status_panel]
+enabled = true
+hotkey = "Ctrl+Alt+S"
+width = 220
+height = 96
+edge_zone = 4
+monitor = "primary"
+
 [hotkeys]
 # Win+Enter permanece reservado por Windows incluso sin Explorer.
 terminal = "Ctrl+Alt+Enter"
@@ -25,3 +33,34 @@ launcher = "Ctrl+Alt+Space"
 browser = "Win+B"
 close_window = "Win+Q"
 recovery = "Ctrl+Alt+Shift+E"
+
+[hotkeys.workspaces]
+switch_1 = "Ctrl+Alt+1"
+switch_2 = "Ctrl+Alt+2"
+switch_3 = "Ctrl+Alt+3"
+switch_4 = "Ctrl+Alt+4"
+switch_5 = "Ctrl+Alt+5"
+switch_6 = "Ctrl+Alt+6"
+switch_7 = "Ctrl+Alt+7"
+switch_8 = "Ctrl+Alt+8"
+switch_9 = "Ctrl+Alt+9"
+move_1 = "Ctrl+Alt+Shift+1"
+move_2 = "Ctrl+Alt+Shift+2"
+move_3 = "Ctrl+Alt+Shift+3"
+move_4 = "Ctrl+Alt+Shift+4"
+move_5 = "Ctrl+Alt+Shift+5"
+move_6 = "Ctrl+Alt+Shift+6"
+move_7 = "Ctrl+Alt+Shift+7"
+move_8 = "Ctrl+Alt+Shift+8"
+move_9 = "Ctrl+Alt+Shift+9"
+
+[hotkeys.window]
+move_left = "Ctrl+Alt+Left"
+move_right = "Ctrl+Alt+Right"
+move_up = "Ctrl+Alt+Up"
+move_down = "Ctrl+Alt+Down"
+resize_grow = "Ctrl+Alt+Shift+Right"
+resize_shrink = "Ctrl+Alt+Shift+Left"
+maximize = "Ctrl+Alt+M"
+restore = "Ctrl+Alt+R"
+focus = "Ctrl+Alt+F"

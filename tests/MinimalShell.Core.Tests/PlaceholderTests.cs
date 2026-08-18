@@ -2,10 +2,12 @@ using Xunit;
 using MinimalShell.Core.Applications;
 using MinimalShell.Core.Commands;
 using MinimalShell.Core.Configuration;
+using MinimalShell.Core.Diagnostics;
 using MinimalShell.Core.Logging;
 using MinimalShell.Core.Processes;
 using MinimalShell.Core.Session;
 using MinimalShell.Core.Runtime;
+using MinimalShell.Core.StatusPanel;
 
 namespace MinimalShell.Core.Tests;
 
@@ -49,6 +51,12 @@ public sealed class PlaceholderTests
 
                 [hotkeys]
                 terminal = "Ctrl+Alt+T"
+
+                [status_panel]
+                hotkey = "Ctrl+Alt+P"
+                width = 240
+                height = 100
+                edge_zone = 6
                 """);
 
             var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
@@ -59,6 +67,148 @@ public sealed class PlaceholderTests
             Assert.Equal("firefox.exe", result.Configuration.Applications.Browser);
             Assert.Equal("Ctrl+Alt+T", result.Configuration.Hotkeys.Terminal);
             Assert.Equal("yazi.exe", result.Configuration.FileManager.Command);
+            Assert.Equal("Ctrl+Alt+1", result.Configuration.WorkspaceHotkeys.Switch[0]);
+            Assert.Equal("Ctrl+Alt+Shift+9", result.Configuration.WorkspaceHotkeys.Move[8]);
+            Assert.Equal("Ctrl+Alt+P", result.Configuration.StatusPanel.Hotkey);
+            Assert.Equal(240, result.Configuration.StatusPanel.Width);
+            Assert.Equal(100, result.Configuration.StatusPanel.Height);
+            Assert.Equal(6, result.Configuration.StatusPanel.EdgeZone);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StatusPanelUsesWorkspaceOneAndFormatsLocalTime()
+    {
+        var state = new StatusPanelState();
+
+        Assert.Equal("Workspace 1", state.WorkspaceLabel);
+        Assert.Equal("14:32:08", state.GetTimeLabel(new DateTime(2026, 8, 18, 14, 32, 8)));
+
+        state.SetWorkspace(4);
+
+        Assert.Equal("Workspace 4", state.WorkspaceLabel);
+    }
+
+    [Fact]
+    public void StatusPanelEdgeRevealHidesWhenPointerLeaves()
+    {
+        var state = new StatusPanelVisibilityState();
+
+        state.ShowFromEdge();
+
+        Assert.True(state.IsVisible);
+        Assert.False(state.IsPinnedByHotkey);
+        Assert.False(state.HideWhenPointerLeaves(pointerInsidePanel: true));
+        Assert.True(state.HideWhenPointerLeaves(pointerInsidePanel: false));
+        Assert.False(state.IsVisible);
+    }
+
+    [Fact]
+    public void StatusPanelHotkeyKeepsPanelVisibleUntilToggledAgain()
+    {
+        var state = new StatusPanelVisibilityState();
+
+        Assert.True(state.ToggleByHotkey());
+        Assert.True(state.IsVisible);
+        Assert.True(state.IsPinnedByHotkey);
+        Assert.False(state.HideWhenPointerLeaves(pointerInsidePanel: false));
+        Assert.False(state.ToggleByHotkey());
+        Assert.False(state.IsVisible);
+    }
+
+    [Fact]
+    public void StatusPanelEdgeDetectorAcceptsOnlyTheConfiguredPrimaryEdgeZone()
+    {
+        var workArea = new StatusPanelRectangle(0, 0, 1920, 1080);
+
+        Assert.True(StatusPanelEdgeDetector.IsAtLeftEdge(new StatusPanelPoint(4, 500), workArea, edgeZone: 4));
+        Assert.False(StatusPanelEdgeDetector.IsAtLeftEdge(new StatusPanelPoint(5, 500), workArea, edgeZone: 4));
+        Assert.False(StatusPanelEdgeDetector.IsAtLeftEdge(new StatusPanelPoint(4, 1080), workArea, edgeZone: 4));
+        Assert.True(StatusPanelEdgeDetector.IsInside(new StatusPanelPoint(10, 20), new StatusPanelRectangle(0, 0, 220, 96)));
+        Assert.False(StatusPanelEdgeDetector.IsInside(new StatusPanelPoint(220, 20), new StatusPanelRectangle(0, 0, 220, 96)));
+    }
+
+    [Fact]
+    public void InvalidStatusPanelConfigurationReturnsReadableErrors()
+    {
+        var directory = CreateTemporaryDirectory();
+        var path = Path.Combine(directory, "invalid-status-panel.toml");
+
+        try
+        {
+            File.WriteAllText(path, """
+                [status_panel]
+                width = 0
+                height = -1
+                edge_zone = -2
+                monitor = "secondary"
+                """);
+
+            var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
+
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, error => error.Contains("status_panel.width"));
+            Assert.Contains(result.Errors, error => error.Contains("status_panel.height"));
+            Assert.Contains(result.Errors, error => error.Contains("status_panel.edge_zone"));
+            Assert.Contains(result.Errors, error => error.Contains("status_panel.monitor"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void StartupDiagnosticsReportsMissingDependenciesWithoutLaunchingThem()
+    {
+        var checker = new RecordingAvailabilityChecker(new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["wezterm.exe"] = true,
+            ["powershell.exe"] = true,
+            ["yazi.exe"] = false,
+            ["brave.exe"] = true
+        });
+        var configuration = new ShellConfiguration
+        {
+            Terminal = new TerminalConfiguration
+            {
+                Command = "wezterm.exe",
+                CommandShell = "powershell.exe"
+            },
+            FileManager = new FileManagerConfiguration { Command = "yazi.exe" },
+            Applications = new ApplicationConfiguration { Browser = "brave.exe" }
+        };
+
+        var result = StartupDiagnostics.Run(configuration, checker);
+
+        Assert.True(result.HasMissingDependencies);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Component == "file manager" && !diagnostic.IsAvailable);
+        Assert.Equal(4, checker.CheckedCommands.Count);
+    }
+
+    [Fact]
+    public void DisabledStatusPanelDoesNotRequireAHotkey()
+    {
+        var directory = CreateTemporaryDirectory();
+        var path = Path.Combine(directory, "disabled-panel.toml");
+
+        try
+        {
+            File.WriteAllText(path, """
+                [status_panel]
+                enabled = false
+                hotkey = ""
+                """);
+
+            var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
+
+            Assert.True(result.IsValid);
+            Assert.False(result.Configuration.StatusPanel.Enabled);
         }
         finally
         {
@@ -303,6 +453,24 @@ public sealed class PlaceholderTests
         {
             LastRequest = request;
             return ProcessLaunchResult.Success(1234);
+        }
+    }
+
+    private sealed class RecordingAvailabilityChecker : ICommandAvailabilityChecker
+    {
+        private readonly IReadOnlyDictionary<string, bool> availability;
+
+        public RecordingAvailabilityChecker(IReadOnlyDictionary<string, bool> availability)
+        {
+            this.availability = availability;
+        }
+
+        public List<string> CheckedCommands { get; } = new();
+
+        public bool IsAvailable(string command)
+        {
+            CheckedCommands.Add(command);
+            return availability.TryGetValue(command, out var available) && available;
         }
     }
 }

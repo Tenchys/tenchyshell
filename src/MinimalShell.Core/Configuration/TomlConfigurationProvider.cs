@@ -62,7 +62,11 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         var fileManager = GetTable(table, "file_manager");
         var launcher = GetTable(table, "launcher");
         var applications = GetTable(table, "applications");
+        var statusPanel = GetTable(table, "status_panel");
         var hotkeys = GetTable(table, "hotkeys");
+        var workspaceHotkeys = GetTable(hotkeys, "workspaces");
+        var windowHotkeys = GetTable(hotkeys, "window");
+        var defaultWorkspaceHotkeys = defaults.WorkspaceHotkeys;
 
         return new ShellConfiguration
         {
@@ -89,6 +93,15 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
             {
                 Browser = GetString(applications, "browser", defaults.Applications.Browser)
             },
+            StatusPanel = new StatusPanelConfiguration
+            {
+                Enabled = GetBoolean(statusPanel, "enabled", defaults.StatusPanel.Enabled),
+                Hotkey = GetString(statusPanel, "hotkey", defaults.StatusPanel.Hotkey),
+                Width = GetInt(statusPanel, "width", defaults.StatusPanel.Width),
+                Height = GetInt(statusPanel, "height", defaults.StatusPanel.Height),
+                EdgeZone = GetInt(statusPanel, "edge_zone", defaults.StatusPanel.EdgeZone),
+                Monitor = GetString(statusPanel, "monitor", defaults.StatusPanel.Monitor)
+            },
             Hotkeys = new HotkeyConfiguration
             {
                 Terminal = GetString(hotkeys, "terminal", defaults.Hotkeys.Terminal),
@@ -97,6 +110,33 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
                 Browser = GetString(hotkeys, "browser", defaults.Hotkeys.Browser),
                 CloseWindow = GetString(hotkeys, "close_window", defaults.Hotkeys.CloseWindow),
                 Recovery = GetString(hotkeys, "recovery", defaults.Hotkeys.Recovery)
+            },
+            WorkspaceHotkeys = new WorkspaceHotkeyConfiguration
+            {
+                Switch = Enumerable.Range(1, 9)
+                    .Select(index => GetString(
+                        workspaceHotkeys,
+                        $"switch_{index}",
+                        defaultWorkspaceHotkeys.Switch[index - 1]))
+                    .ToArray(),
+                Move = Enumerable.Range(1, 9)
+                    .Select(index => GetString(
+                        workspaceHotkeys,
+                        $"move_{index}",
+                        defaultWorkspaceHotkeys.Move[index - 1]))
+                    .ToArray()
+            },
+            WindowHotkeys = new WindowHotkeyConfiguration
+            {
+                MoveLeft = GetString(windowHotkeys, "move_left", defaults.WindowHotkeys.MoveLeft),
+                MoveRight = GetString(windowHotkeys, "move_right", defaults.WindowHotkeys.MoveRight),
+                MoveUp = GetString(windowHotkeys, "move_up", defaults.WindowHotkeys.MoveUp),
+                MoveDown = GetString(windowHotkeys, "move_down", defaults.WindowHotkeys.MoveDown),
+                ResizeGrow = GetString(windowHotkeys, "resize_grow", defaults.WindowHotkeys.ResizeGrow),
+                ResizeShrink = GetString(windowHotkeys, "resize_shrink", defaults.WindowHotkeys.ResizeShrink),
+                Maximize = GetString(windowHotkeys, "maximize", defaults.WindowHotkeys.Maximize),
+                Restore = GetString(windowHotkeys, "restore", defaults.WindowHotkeys.Restore),
+                Focus = GetString(windowHotkeys, "focus", defaults.WindowHotkeys.Focus)
             }
         };
     }
@@ -114,6 +154,46 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         AddRequiredError(errors, "hotkeys.browser", configuration.Hotkeys.Browser);
         AddRequiredError(errors, "hotkeys.close_window", configuration.Hotkeys.CloseWindow);
         AddRequiredError(errors, "hotkeys.recovery", configuration.Hotkeys.Recovery);
+        if (configuration.StatusPanel.Enabled)
+        {
+            AddRequiredError(errors, "status_panel.hotkey", configuration.StatusPanel.Hotkey);
+        }
+
+        if (configuration.StatusPanel.Width <= 0)
+        {
+            errors.Add("'status_panel.width' debe ser mayor que cero.");
+        }
+
+        if (configuration.StatusPanel.Height <= 0)
+        {
+            errors.Add("'status_panel.height' debe ser mayor que cero.");
+        }
+
+        if (configuration.StatusPanel.EdgeZone < 0)
+        {
+            errors.Add("'status_panel.edge_zone' no puede ser negativo.");
+        }
+
+        if (!string.Equals(configuration.StatusPanel.Monitor, "primary", StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add("'status_panel.monitor' solo admite actualmente el valor 'primary'.");
+        }
+
+        for (var index = 0; index < 9; index++)
+        {
+            AddRequiredError(errors, $"hotkeys.workspaces.switch_{index + 1}", configuration.WorkspaceHotkeys.Switch[index]);
+            AddRequiredError(errors, $"hotkeys.workspaces.move_{index + 1}", configuration.WorkspaceHotkeys.Move[index]);
+        }
+
+        AddRequiredError(errors, "hotkeys.window.move_left", configuration.WindowHotkeys.MoveLeft);
+        AddRequiredError(errors, "hotkeys.window.move_right", configuration.WindowHotkeys.MoveRight);
+        AddRequiredError(errors, "hotkeys.window.move_up", configuration.WindowHotkeys.MoveUp);
+        AddRequiredError(errors, "hotkeys.window.move_down", configuration.WindowHotkeys.MoveDown);
+        AddRequiredError(errors, "hotkeys.window.resize_grow", configuration.WindowHotkeys.ResizeGrow);
+        AddRequiredError(errors, "hotkeys.window.resize_shrink", configuration.WindowHotkeys.ResizeShrink);
+        AddRequiredError(errors, "hotkeys.window.maximize", configuration.WindowHotkeys.Maximize);
+        AddRequiredError(errors, "hotkeys.window.restore", configuration.WindowHotkeys.Restore);
+        AddRequiredError(errors, "hotkeys.window.focus", configuration.WindowHotkeys.Focus);
 
         return errors;
     }
@@ -139,5 +219,10 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
     private static bool GetBoolean(TomlTable table, string key, bool fallback) =>
         table.TryGetValue(key, out var value) && value is bool boolean
             ? boolean
+            : fallback;
+
+    private static int GetInt(TomlTable table, string key, int fallback) =>
+        table.TryGetValue(key, out var value) && value is long number && number <= int.MaxValue && number >= int.MinValue
+            ? (int)number
             : fallback;
 }

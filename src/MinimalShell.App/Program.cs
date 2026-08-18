@@ -1,4 +1,5 @@
 using MinimalShell.Core.Configuration;
+using MinimalShell.Core.Diagnostics;
 using MinimalShell.Core.Logging;
 using MinimalShell.Core.Commands;
 using MinimalShell.Core.Session;
@@ -10,10 +11,17 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
+        if (HasArgument(args, "--help") || HasArgument(args, "-h"))
+        {
+            PrintUsage();
+            return 0;
+        }
+
         var logger = new FileLogger();
         var launchIndex = Array.FindIndex(args, argument => argument.Equals("--launch", StringComparison.OrdinalIgnoreCase));
         var sessionIndex = Array.FindIndex(args, argument => argument.Equals("--session", StringComparison.OrdinalIgnoreCase));
         var withoutExplorer = args.Any(argument => argument.Equals("--without-explorer", StringComparison.OrdinalIgnoreCase));
+        var checkOnly = HasArgument(args, "--check");
         var configurationPath = GetConfigurationPath(args);
         var result = new TomlConfigurationProvider(logger).Load(configurationPath);
 
@@ -27,6 +35,16 @@ internal static class Program
             }
 
             return 1;
+        }
+
+        var diagnostics = StartupDiagnostics.Run(
+            result.Configuration,
+            new EnvironmentCommandAvailabilityChecker());
+        ReportStartupDiagnostics(logger, diagnostics);
+
+        if (checkOnly)
+        {
+            return diagnostics.HasMissingDependencies ? 2 : 0;
         }
 
         if (launchIndex >= 0)
@@ -121,6 +139,43 @@ internal static class Program
         }
 
         return null;
+    }
+
+    private static bool HasArgument(IEnumerable<string> args, string argument) =>
+        args.Any(value => value.Equals(argument, StringComparison.OrdinalIgnoreCase));
+
+    private static void ReportStartupDiagnostics(ILogger logger, StartupDiagnosticsResult diagnostics)
+    {
+        foreach (var diagnostic in diagnostics.Diagnostics)
+        {
+            if (diagnostic.IsAvailable)
+            {
+                var message = $"Diagnóstico: {diagnostic.Component} disponible ('{diagnostic.Command}').";
+                logger.Info(message);
+                Console.WriteLine($"[OK] {message}");
+            }
+            else
+            {
+                var message = $"Diagnóstico: no se encontró {diagnostic.Component} ('{diagnostic.Command}').";
+                logger.Error(message);
+                Console.Error.WriteLine($"[ADVERTENCIA] {message}");
+            }
+        }
+    }
+
+    private static void PrintUsage()
+    {
+        Console.WriteLine("MinimalShell — shell minimalista para Windows");
+        Console.WriteLine();
+        Console.WriteLine("Uso:");
+        Console.WriteLine("  MinimalShell.exe [config.toml]");
+        Console.WriteLine("  MinimalShell.exe --check [config.toml]");
+        Console.WriteLine("  MinimalShell.exe --launch terminal|files|browser [config.toml]");
+        Console.WriteLine("  MinimalShell.exe --without-explorer [config.toml]");
+        Console.WriteLine("  MinimalShell.exe --session logout|shutdown|restart --confirm [config.toml]");
+        Console.WriteLine();
+        Console.WriteLine("--check valida dependencias y configuración sin registrar hotkeys ni cerrar Explorer.");
+        Console.WriteLine("--without-explorer requiere confirmación y solo debe usarse en una VM o usuario secundario.");
     }
 
     private static MinimalShell.Core.Processes.ProcessLaunchResult ExecuteLaunchAction(

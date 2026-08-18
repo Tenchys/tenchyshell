@@ -6,6 +6,7 @@ using MinimalShell.Core.Logging;
 using MinimalShell.Core.Processes;
 using MinimalShell.Core.Windows;
 using MinimalShell.Win32;
+using MinimalShell.Workspaces;
 
 namespace MinimalShell.App;
 
@@ -17,6 +18,18 @@ internal sealed class ShellHost : IDisposable
     private const int FilesHotkeyId = 4;
     private const int BrowserHotkeyId = 5;
     private const int CloseWindowHotkeyId = 6;
+    private const int WorkspaceSwitchHotkeyStart = 10;
+    private const int WorkspaceMoveHotkeyStart = 20;
+    private const int WindowMoveLeftHotkeyId = 30;
+    private const int WindowMoveRightHotkeyId = 31;
+    private const int WindowMoveUpHotkeyId = 32;
+    private const int WindowMoveDownHotkeyId = 33;
+    private const int WindowResizeGrowHotkeyId = 34;
+    private const int WindowResizeShrinkHotkeyId = 35;
+    private const int WindowMaximizeHotkeyId = 36;
+    private const int WindowRestoreHotkeyId = 37;
+    private const int WindowFocusHotkeyId = 38;
+    private const int StatusPanelHotkeyId = 40;
 
     private readonly ShellConfiguration configuration;
     private readonly ILogger logger;
@@ -27,6 +40,8 @@ internal sealed class ShellHost : IDisposable
     private readonly LauncherWindow launcherWindow;
     private readonly IWindowService windowService;
     private readonly bool stopExplorerAfterHotkeys;
+    private readonly WorkspaceManager workspaceManager;
+    private readonly StatusPanelWindow? statusPanelWindow;
     private bool isDisposed;
 
     public ShellHost(ShellConfiguration configuration, ILogger logger, bool stopExplorerAfterHotkeys = false)
@@ -41,6 +56,10 @@ internal sealed class ShellHost : IDisposable
         applicationLauncher = new ProcessApplicationLauncher(processLauncher, logger);
         launcherWindow = new LauncherWindow(applicationCatalog);
         windowService = new WindowService();
+        workspaceManager = new WorkspaceManager(new WorkspaceWindowService());
+        statusPanelWindow = configuration.StatusPanel.Enabled
+            ? new StatusPanelWindow(configuration.StatusPanel, logger)
+            : null;
     }
 
     public ShellActions Actions => actions;
@@ -60,6 +79,9 @@ internal sealed class ShellHost : IDisposable
         try
         {
             ConfigureHotkeys();
+            workspaceManager.Refresh();
+            statusPanelWindow?.SetWorkspace(workspaceManager.CurrentWorkspace);
+            statusPanelWindow?.Start();
             applicationCatalog.Refresh();
             logger.Info($"Catálogo de aplicaciones cargado: {applicationCatalog.GetAll().Count} entradas.");
             logger.Info($"MinimalShell iniciado. Terminal configurado: {configuration.Terminal.Command}.");
@@ -97,6 +119,7 @@ internal sealed class ShellHost : IDisposable
             return;
         }
 
+        statusPanelWindow?.Dispose();
         messageLoop.Dispose();
         launcherWindow.Dispose();
         logger.Info("MinimalShell finalizado; se liberaron hotkeys y recursos Win32.");
@@ -178,6 +201,33 @@ internal sealed class ShellHost : IDisposable
         ConfigureHotkey(BrowserHotkeyId, "navegador", configuration.Hotkeys.Browser);
         ConfigureHotkey(CloseWindowHotkeyId, "cerrar ventana", configuration.Hotkeys.CloseWindow);
 
+        for (var workspace = WorkspaceManager.FirstWorkspace; workspace <= WorkspaceManager.LastWorkspace; workspace++)
+        {
+            ConfigureHotkey(
+                WorkspaceSwitchHotkeyStart + workspace - 1,
+                $"cambiar al workspace {workspace}",
+                configuration.WorkspaceHotkeys.Switch[workspace - 1]);
+            ConfigureHotkey(
+                WorkspaceMoveHotkeyStart + workspace - 1,
+                $"mover al workspace {workspace}",
+                configuration.WorkspaceHotkeys.Move[workspace - 1]);
+        }
+
+        ConfigureHotkey(WindowMoveLeftHotkeyId, "mover ventana a la izquierda", configuration.WindowHotkeys.MoveLeft);
+        ConfigureHotkey(WindowMoveRightHotkeyId, "mover ventana a la derecha", configuration.WindowHotkeys.MoveRight);
+        ConfigureHotkey(WindowMoveUpHotkeyId, "mover ventana arriba", configuration.WindowHotkeys.MoveUp);
+        ConfigureHotkey(WindowMoveDownHotkeyId, "mover ventana abajo", configuration.WindowHotkeys.MoveDown);
+        ConfigureHotkey(WindowResizeGrowHotkeyId, "aumentar ventana", configuration.WindowHotkeys.ResizeGrow);
+        ConfigureHotkey(WindowResizeShrinkHotkeyId, "reducir ventana", configuration.WindowHotkeys.ResizeShrink);
+        ConfigureHotkey(WindowMaximizeHotkeyId, "maximizar ventana", configuration.WindowHotkeys.Maximize);
+        ConfigureHotkey(WindowRestoreHotkeyId, "restaurar ventana", configuration.WindowHotkeys.Restore);
+        ConfigureHotkey(WindowFocusHotkeyId, "enfocar ventana", configuration.WindowHotkeys.Focus);
+
+        if (configuration.StatusPanel.Enabled)
+        {
+            ConfigureHotkey(StatusPanelHotkeyId, "panel informativo", configuration.StatusPanel.Hotkey);
+        }
+
         if (configuration.Launcher.Enabled)
         {
             ConfigureHotkey(LauncherHotkeyId, "launcher", configuration.Hotkeys.Launcher);
@@ -228,6 +278,45 @@ internal sealed class ShellHost : IDisposable
             case CloseWindowHotkeyId:
                 CloseActiveWindow();
                 break;
+            case >= WorkspaceSwitchHotkeyStart and < WorkspaceSwitchHotkeyStart + 9:
+                SwitchWorkspace(id - WorkspaceSwitchHotkeyStart + 1);
+                break;
+            case >= WorkspaceMoveHotkeyStart and < WorkspaceMoveHotkeyStart + 9:
+                MoveForegroundToWorkspace(id - WorkspaceMoveHotkeyStart + 1);
+                break;
+            case WindowMoveLeftHotkeyId:
+                ReportWindowOperation(windowService.MoveActiveWindow(-40, 0));
+                break;
+            case WindowMoveRightHotkeyId:
+                ReportWindowOperation(windowService.MoveActiveWindow(40, 0));
+                break;
+            case WindowMoveUpHotkeyId:
+                ReportWindowOperation(windowService.MoveActiveWindow(0, -40));
+                break;
+            case WindowMoveDownHotkeyId:
+                ReportWindowOperation(windowService.MoveActiveWindow(0, 40));
+                break;
+            case WindowResizeGrowHotkeyId:
+                ReportWindowOperation(windowService.ResizeActiveWindow(80, 50));
+                break;
+            case WindowResizeShrinkHotkeyId:
+                ReportWindowOperation(windowService.ResizeActiveWindow(-80, -50));
+                break;
+            case WindowMaximizeHotkeyId:
+                ReportWindowOperation(windowService.MaximizeActiveWindow());
+                break;
+            case WindowRestoreHotkeyId:
+                ReportWindowOperation(windowService.RestoreActiveWindow());
+                break;
+            case WindowFocusHotkeyId:
+                ReportWindowOperation(windowService.FocusActiveWindow());
+                break;
+            case StatusPanelHotkeyId when configuration.StatusPanel.Enabled:
+                statusPanelWindow?.ToggleByHotkey();
+                logger.Info(statusPanelWindow?.IsVisible == true
+                    ? "Panel informativo mostrado mediante hotkey."
+                    : "Panel informativo ocultado mediante hotkey.");
+                break;
         }
     }
 
@@ -247,12 +336,64 @@ internal sealed class ShellHost : IDisposable
     private (string ActionName, string ConfiguredValue) GetHotkeyDescription(int id) => id switch
     {
         LauncherHotkeyId => ("launcher", configuration.Hotkeys.Launcher),
+        StatusPanelHotkeyId => ("panel informativo", configuration.StatusPanel.Hotkey),
         TerminalHotkeyId => ("terminal", configuration.Hotkeys.Terminal),
         FilesHotkeyId => ("archivos", configuration.Hotkeys.Files),
         BrowserHotkeyId => ("navegador", configuration.Hotkeys.Browser),
         CloseWindowHotkeyId => ("cerrar ventana", configuration.Hotkeys.CloseWindow),
+        >= WorkspaceSwitchHotkeyStart and < WorkspaceSwitchHotkeyStart + 9 => (
+            $"cambiar al workspace {id - WorkspaceSwitchHotkeyStart + 1}",
+            configuration.WorkspaceHotkeys.Switch[id - WorkspaceSwitchHotkeyStart]),
+        >= WorkspaceMoveHotkeyStart and < WorkspaceMoveHotkeyStart + 9 => (
+            $"mover al workspace {id - WorkspaceMoveHotkeyStart + 1}",
+            configuration.WorkspaceHotkeys.Move[id - WorkspaceMoveHotkeyStart]),
+        WindowMoveLeftHotkeyId => ("mover ventana a la izquierda", configuration.WindowHotkeys.MoveLeft),
+        WindowMoveRightHotkeyId => ("mover ventana a la derecha", configuration.WindowHotkeys.MoveRight),
+        WindowMoveUpHotkeyId => ("mover ventana arriba", configuration.WindowHotkeys.MoveUp),
+        WindowMoveDownHotkeyId => ("mover ventana abajo", configuration.WindowHotkeys.MoveDown),
+        WindowResizeGrowHotkeyId => ("aumentar ventana", configuration.WindowHotkeys.ResizeGrow),
+        WindowResizeShrinkHotkeyId => ("reducir ventana", configuration.WindowHotkeys.ResizeShrink),
+        WindowMaximizeHotkeyId => ("maximizar ventana", configuration.WindowHotkeys.Maximize),
+        WindowRestoreHotkeyId => ("restaurar ventana", configuration.WindowHotkeys.Restore),
+        WindowFocusHotkeyId => ("enfocar ventana", configuration.WindowHotkeys.Focus),
         _ => ($"identificador {id}", "desconocido")
     };
+
+    private void SwitchWorkspace(int workspace)
+    {
+        var result = workspaceManager.SwitchTo(workspace);
+        if (result.Succeeded)
+        {
+            statusPanelWindow?.SetWorkspace(workspace);
+            logger.Info($"Workspace activo: {workspace}.");
+        }
+        else
+        {
+            logger.Error($"No se pudo cambiar al workspace {workspace}: {result.Error}");
+        }
+    }
+
+    private void MoveForegroundToWorkspace(int workspace)
+    {
+        var result = workspaceManager.MoveForegroundTo(workspace);
+        if (result.Succeeded)
+        {
+            logger.Info($"Ventana activa movida al workspace {workspace}.");
+        }
+        else
+        {
+            logger.Error($"No se pudo mover la ventana activa al workspace {workspace}: {result.Error}");
+        }
+    }
+
+    private void ReportWindowOperation(WindowOperationResult result)
+    {
+        if (!result.Succeeded)
+        {
+            logger.Error($"No se pudo operar sobre la ventana activa: {result.Error}");
+            Console.Error.WriteLine($"No se pudo operar sobre la ventana activa: {result.Error}");
+        }
+    }
 
     private void OnApplicationSelected(ApplicationEntry application)
     {

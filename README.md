@@ -4,7 +4,7 @@ Shell minimalista para Windows 11 Pro, orientado al teclado y diseñado para red
 
 ## Estado actual
 
-El MVP 0.1 candidato incluye configuración TOML, logging, message loop Win32, recuperación de Explorer, launcher nativo, hotkeys configurables y cierre cooperativo de la ventana activa. La aplicación mantiene una única instancia por sesión.
+El MVP 0.5 incluye configuración TOML, logging, diagnóstico de dependencias, message loop Win32, recuperación de Explorer, launcher nativo, workspaces, gestión básica de ventanas, panel informativo, hotkeys configurables y cierre cooperativo de la ventana activa. La aplicación mantiene una única instancia por sesión.
 
 ## Requisitos
 
@@ -33,6 +33,9 @@ dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj
 # Ejecutar usando un archivo TOML específico
 dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- config/MinimalShell.example.toml
 
+# Diagnosticar configuración y dependencias sin iniciar el shell
+dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --check config/MinimalShell.example.toml
+
 # Probar un lanzamiento concreto sin iniciar el message loop
 dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --launch terminal
 dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --launch files
@@ -45,9 +48,15 @@ dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --session r
 
 # Publicar el ejecutable para Windows x64
 dotnet publish src/MinimalShell.App/MinimalShell.App.csproj -c Release -r win-x64 --self-contained false
+
+# Publicar en publish/Debug/win-x64 o publish/Release/win-x64
+.\scripts\publish.ps1 -Configuration Debug
+.\scripts\publish.ps1 -Configuration Release
 ```
 
 La compilación debe finalizar sin advertencias ni errores. Las pruebas no deben apagar, reiniciar ni cerrar sesión en la máquina.
+
+`--check` comprueba que estén disponibles el terminal, el shell de comandos, Yazi y el navegador configurado. Las ausencias se reportan como advertencias y no impiden el arranque normal; el modo de comprobación termina con código `2` si falta alguna dependencia.
 
 ## Estructura
 
@@ -77,6 +86,8 @@ Los valores de `[hotkeys]` en el TOML se registran al iniciar el shell. Las comb
 - `Ctrl+Alt+Space`: launcher.
 - `Ctrl+Alt+B`: navegador.
 - `Ctrl+Alt+Shift+E`: recuperación, inicia `explorer.exe`.
+- `Ctrl+Alt+1..9`: cambiar al workspace 1..9.
+- `Ctrl+Alt+Shift+1..9`: mover la ventana activa al workspace 1..9.
 
 `Win+Q` solicita el cierre normal de la ventana activa. Las aplicaciones pueden mostrar sus propios diálogos de guardado; MinimalShell nunca termina el proceso de forma forzada.
 
@@ -88,6 +99,26 @@ launcher = "F12"
 ```
 
 Detén cualquier instancia anterior de MinimalShell y vuelve a iniciarla con ese archivo TOML para aplicar el cambio.
+
+Los hotkeys de workspaces se configuran en `[hotkeys.workspaces]` mediante `switch_1` a `switch_9` y `move_1` a `move_9`.
+
+Las operaciones básicas de ventana usan `[hotkeys.window]`: flechas para mover, `resize_grow`/`resize_shrink` para cambiar tamaño, `maximize`, `restore` y `focus`. Las operaciones respetan el área de trabajo del monitor y no terminan procesos.
+
+## Panel informativo
+
+El panel opcional se configura en `[status_panel]` y está habilitado por defecto:
+
+```toml
+[status_panel]
+enabled = true
+hotkey = "Ctrl+Alt+S"
+width = 220
+height = 96
+edge_zone = 4
+monitor = "primary"
+```
+
+Permanece oculto al iniciar. `Ctrl+Alt+S` lo muestra u oculta de forma persistente; llevar el mouse al borde izquierdo lo muestra temporalmente y se oculta al salir del panel. No recibe foco ni comandos y solo muestra el workspace activo y la hora local.
 
 ## Launcher mínimo
 
