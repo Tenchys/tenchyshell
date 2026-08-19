@@ -1,5 +1,6 @@
 using Tomlyn;
 using Tomlyn.Model;
+using MinimalShell.Core.Layout;
 using MinimalShell.Core.Logging;
 
 namespace MinimalShell.Core.Configuration;
@@ -63,9 +64,11 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         var launcher = GetTable(table, "launcher");
         var applications = GetTable(table, "applications");
         var statusPanel = GetTable(table, "status_panel");
+        var layout = GetTable(table, "layout");
         var hotkeys = GetTable(table, "hotkeys");
         var workspaceHotkeys = GetTable(hotkeys, "workspaces");
         var windowHotkeys = GetTable(hotkeys, "window");
+        var layoutHotkeys = GetTable(hotkeys, "layout");
         var defaultWorkspaceHotkeys = defaults.WorkspaceHotkeys;
 
         return new ShellConfiguration
@@ -101,6 +104,27 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
                 Height = GetInt(statusPanel, "height", defaults.StatusPanel.Height),
                 EdgeZone = GetInt(statusPanel, "edge_zone", defaults.StatusPanel.EdgeZone),
                 Monitor = GetString(statusPanel, "monitor", defaults.StatusPanel.Monitor)
+            },
+            Layout = new LayoutConfiguration
+            {
+                Enabled = GetBoolean(layout, "enabled", defaults.Layout.Enabled),
+                MaxZones = GetInt(layout, "max_zones", defaults.Layout.MaxZones),
+                DefaultPreset = GetString(layout, "default_preset", defaults.Layout.DefaultPreset),
+                ZoneNumberSizePercent = GetDouble(
+                    layout,
+                    "zone_number_size_percent",
+                    defaults.Layout.ZoneNumberSizePercent),
+                Zones = GetLayoutZones(layout)
+            },
+            LayoutHotkeys = new LayoutHotkeyConfiguration
+            {
+                Zones = Enumerable.Range(1, 9)
+                    .Select(index => GetString(
+                        layoutHotkeys,
+                        $"zone_{index}",
+                        defaults.LayoutHotkeys.Zones[index - 1]))
+                    .ToArray(),
+                DragModifier = GetString(layoutHotkeys, "drag_modifier", defaults.LayoutHotkeys.DragModifier)
             },
             Hotkeys = new HotkeyConfiguration
             {
@@ -154,6 +178,30 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         AddRequiredError(errors, "hotkeys.browser", configuration.Hotkeys.Browser);
         AddRequiredError(errors, "hotkeys.close_window", configuration.Hotkeys.CloseWindow);
         AddRequiredError(errors, "hotkeys.recovery", configuration.Hotkeys.Recovery);
+        if (configuration.Layout.Enabled)
+        {
+            if (!string.Equals(configuration.Layout.DefaultPreset, "1x2", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("'layout.default_preset' solo admite actualmente el valor '1x2'.");
+            }
+
+            var layoutErrors = LayoutZoneValidator.Validate(configuration.Layout.Zones, configuration.Layout.MaxZones);
+            errors.AddRange(layoutErrors.Errors);
+
+            if (configuration.Layout.ZoneNumberSizePercent <= 0 ||
+                configuration.Layout.ZoneNumberSizePercent > 25)
+            {
+                errors.Add("'layout.zone_number_size_percent' debe ser mayor que 0 y no superar 25.");
+            }
+
+            for (var index = 0; index < 9; index++)
+            {
+                AddRequiredError(errors, $"hotkeys.layout.zone_{index + 1}", configuration.LayoutHotkeys.Zones[index]);
+            }
+
+            AddRequiredError(errors, "hotkeys.layout.drag_modifier", configuration.LayoutHotkeys.DragModifier);
+        }
+
         if (configuration.StatusPanel.Enabled)
         {
             AddRequiredError(errors, "status_panel.hotkey", configuration.StatusPanel.Hotkey);
@@ -225,4 +273,39 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         table.TryGetValue(key, out var value) && value is long number && number <= int.MaxValue && number >= int.MinValue
             ? (int)number
             : fallback;
+
+    private static double GetDouble(TomlTable table, string key, double fallback) =>
+        table.TryGetValue(key, out var value) && value is double number
+            ? number
+            : table.TryGetValue(key, out value) && value is long integer
+                ? integer
+                : fallback;
+
+    private static IReadOnlyList<LayoutZone> GetLayoutZones(TomlTable layout)
+    {
+        if (!layout.TryGetValue("zones", out var value) || value is not TomlTableArray array)
+        {
+            return Array.Empty<LayoutZone>();
+        }
+
+        var zones = new List<LayoutZone>();
+        foreach (var item in array)
+        {
+            if (item is not TomlTable zone)
+            {
+                zones.Add(new LayoutZone(0, string.Empty, double.NaN, double.NaN, double.NaN, double.NaN));
+                continue;
+            }
+
+            zones.Add(new LayoutZone(
+                GetInt(zone, "number", 0),
+                GetString(zone, "monitor", string.Empty),
+                GetDouble(zone, "left", double.NaN),
+                GetDouble(zone, "top", double.NaN),
+                GetDouble(zone, "right", double.NaN),
+                GetDouble(zone, "bottom", double.NaN)));
+        }
+
+        return zones;
+    }
 }

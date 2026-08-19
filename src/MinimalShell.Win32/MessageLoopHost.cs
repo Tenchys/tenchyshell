@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 
 namespace MinimalShell.Win32;
@@ -11,6 +12,7 @@ public sealed class MessageLoopHost : IDisposable
     private readonly Dictionary<int, HotkeyCombination> hotkeys = new();
     private readonly HashSet<int> requiredHotkeys = new();
     private readonly HashSet<int> registeredHotkeys = new();
+    private readonly ConcurrentQueue<Action> postedActions = new();
     private IntPtr windowHandle;
     private ushort windowClassAtom;
     private bool isRunning;
@@ -29,6 +31,19 @@ public sealed class MessageLoopHost : IDisposable
     public event Action<int>? HotkeyRegistered;
 
     public event Action<int, int>? HotkeyRegistrationFailed;
+
+    public void Post(Action action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+
+        if (isDisposed || windowHandle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        postedActions.Enqueue(action);
+        NativeMethods.PostMessage(windowHandle, NativeMethods.WM_APP_EXECUTE, IntPtr.Zero, IntPtr.Zero);
+    }
 
     public void ConfigureHotkey(int id, HotkeyCombination combination, bool required = false)
     {
@@ -198,6 +213,25 @@ public sealed class MessageLoopHost : IDisposable
 
     private IntPtr WindowProcedure(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam)
     {
+        if (message == NativeMethods.WM_APP_EXECUTE)
+        {
+            while (postedActions.TryDequeue(out var action))
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception exception)
+                {
+                    FatalError?.Invoke(exception);
+                    Stop();
+                    break;
+                }
+            }
+
+            return IntPtr.Zero;
+        }
+
         if (message == NativeMethods.WM_HOTKEY)
         {
             try

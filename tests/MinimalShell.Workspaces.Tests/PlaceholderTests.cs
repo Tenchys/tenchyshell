@@ -60,6 +60,16 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
+    public void HotkeyParserSupportsLayoutCombination()
+    {
+        var parsed = HotkeyParser.TryParse("Ctrl+Win+1", out var combination, out var error);
+
+        Assert.True(parsed, error);
+        Assert.NotEqual(0u, combination.Modifiers);
+        Assert.Equal((uint)'1', combination.VirtualKey);
+    }
+
+    [Fact]
     public void WindowServiceRejectsAnInvalidForegroundWindow()
     {
         var service = new WindowService(new FakeWindowNativeApi { ForegroundWindow = IntPtr.Zero }, currentProcessId: 10);
@@ -92,6 +102,23 @@ public sealed class PlaceholderTests
 
         Assert.True(result.Succeeded, result.Error);
         Assert.True(nativeApi.CloseRequested);
+    }
+
+    [Fact]
+    public void WindowServiceGetsTheWindowUnderThePointerInsteadOfTheForegroundWindow()
+    {
+        var nativeApi = new FakeWindowNativeApi
+        {
+            ForegroundWindow = (IntPtr)111,
+            PointWindow = (IntPtr)222,
+            ProcessId = 20
+        };
+        var service = new WindowService(nativeApi, currentProcessId: 10);
+
+        var found = service.TryGetWindowAtPoint(500, 300, out var windowHandle, out var error);
+
+        Assert.True(found, error);
+        Assert.Equal((IntPtr)222, windowHandle);
     }
 
     [Fact]
@@ -153,6 +180,64 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
+    public void WindowServiceRestoresAndPlacesActiveWindowInsideRequestedZone()
+    {
+        var nativeApi = new FakeWindowNativeApi
+        {
+            ForegroundWindow = (IntPtr)123,
+            ProcessId = 20,
+            WorkArea = new WindowRect(0, 0, 800, 600)
+        };
+        var service = new WindowService(nativeApi, currentProcessId: 10);
+
+        var result = service.PlaceActiveWindow(new WindowRect(400, 0, 1000, 600));
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Equal(new WindowRect(200, 0, 800, 600), nativeApi.LastPosition);
+        Assert.Equal(9u, nativeApi.LastShowCommand);
+        Assert.False(nativeApi.FocusRequested);
+    }
+
+    [Fact]
+    public void WindowServiceReturnsTheActiveMonitorIdentityAndWorkArea()
+    {
+        var nativeApi = new FakeWindowNativeApi
+        {
+            ForegroundWindow = (IntPtr)123,
+            ProcessId = 20,
+            MonitorId = "\\.\\DISPLAY2",
+            IsPrimary = false,
+            WorkArea = new WindowRect(-1920, 0, 0, 1080)
+        };
+        var service = new WindowService(nativeApi, currentProcessId: 10);
+
+        var found = service.TryGetActiveMonitor(out var monitor, out var error);
+
+        Assert.True(found, error);
+        Assert.Equal("\\.\\DISPLAY2", monitor.Id);
+        Assert.False(monitor.IsPrimary);
+        Assert.Equal(new WindowRect(-1920, 0, 0, 1080), monitor.WorkArea);
+    }
+
+    [Fact]
+    public void WindowServiceUsesTheDestinationMonitorWhenPlacingAcrossMonitors()
+    {
+        var nativeApi = new FakeWindowNativeApi
+        {
+            ForegroundWindow = (IntPtr)123,
+            ProcessId = 20,
+            WorkArea = new WindowRect(0, 0, 1920, 1080),
+            PointWorkArea = new WindowRect(-1920, 0, 0, 1080)
+        };
+        var service = new WindowService(nativeApi, currentProcessId: 10);
+
+        var result = service.PlaceWindow((IntPtr)123, new WindowRect(-1920, 0, -960, 1080));
+
+        Assert.True(result.Succeeded, result.Error);
+        Assert.Equal(new WindowRect(-1920, 0, -960, 1080), nativeApi.LastPosition);
+    }
+
+    [Fact]
     public void WindowServiceMaximizesAndRestoresActiveWindow()
     {
         var nativeApi = new FakeWindowNativeApi { ForegroundWindow = (IntPtr)123, ProcessId = 20 };
@@ -196,13 +281,21 @@ public sealed class PlaceholderTests
     {
         public IntPtr ForegroundWindow { get; init; }
 
+        public IntPtr PointWindow { get; init; }
+
         public uint ProcessId { get; init; }
+
+        public string MonitorId { get; init; } = "\\.\\DISPLAY1";
+
+        public bool IsPrimary { get; init; } = true;
 
         public bool CloseRequested { get; private set; }
 
         public WindowRect CurrentRect { get; set; } = new(100, 100, 500, 400);
 
         public WindowRect WorkArea { get; set; } = new(0, 0, 1920, 1080);
+
+        public WindowRect PointWorkArea { get; set; }
 
         public WindowRect? LastPosition { get; private set; }
 
@@ -211,6 +304,8 @@ public sealed class PlaceholderTests
         public bool FocusRequested { get; private set; }
 
         public IntPtr GetForegroundWindow() => ForegroundWindow;
+
+        public IntPtr GetWindowFromPoint(int x, int y) => PointWindow == IntPtr.Zero ? ForegroundWindow : PointWindow;
 
         public bool IsWindow(IntPtr windowHandle) => windowHandle != IntPtr.Zero;
 
@@ -232,6 +327,21 @@ public sealed class PlaceholderTests
         public bool TryGetWorkArea(IntPtr windowHandle, out WindowRect workArea)
         {
             workArea = WorkArea;
+            return true;
+        }
+
+        public bool TryGetMonitor(IntPtr windowHandle, out WindowMonitor monitor)
+        {
+            monitor = new WindowMonitor(MonitorId, IsPrimary, WorkArea);
+            return true;
+        }
+
+        public bool TryGetMonitorAtPoint(int x, int y, out WindowMonitor monitor)
+        {
+            var workArea = PointWorkArea.Width > 0 && PointWorkArea.Height > 0
+                ? PointWorkArea
+                : WorkArea;
+            monitor = new WindowMonitor(MonitorId, IsPrimary, workArea);
             return true;
         }
 

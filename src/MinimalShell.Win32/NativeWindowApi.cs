@@ -7,6 +7,17 @@ internal sealed class NativeWindowApi : IWindowNativeApi
 {
     public IntPtr GetForegroundWindow() => NativeMethods.GetForegroundWindow();
 
+    public IntPtr GetWindowFromPoint(int x, int y)
+    {
+        var point = new NativeMethods.Point { X = x, Y = y };
+        var windowHandle = NativeMethods.WindowFromPoint(point);
+        var rootWindow = windowHandle == IntPtr.Zero
+            ? IntPtr.Zero
+            : NativeMethods.GetAncestor(windowHandle, NativeMethods.GA_ROOT);
+
+        return rootWindow == IntPtr.Zero ? windowHandle : rootWindow;
+    }
+
     public bool IsWindow(IntPtr windowHandle) => NativeMethods.IsWindow(windowHandle);
 
     public uint GetWindowProcessId(IntPtr windowHandle)
@@ -36,24 +47,28 @@ internal sealed class NativeWindowApi : IWindowNativeApi
 
     public bool TryGetWorkArea(IntPtr windowHandle, out WindowRect workArea)
     {
-        var monitor = NativeMethods.MonitorFromWindow(windowHandle, NativeMethods.MONITOR_DEFAULTTONEAREST);
-        var monitorInfo = new NativeMethods.MonitorInfo
-        {
-            Size = (uint)Marshal.SizeOf<NativeMethods.MonitorInfo>()
-        };
-
-        if (monitor == IntPtr.Zero || !NativeMethods.GetMonitorInfo(monitor, ref monitorInfo))
+        if (!TryGetMonitor(windowHandle, out var monitor))
         {
             workArea = default;
             return false;
         }
 
-        workArea = new WindowRect(
-            monitorInfo.Work.Left,
-            monitorInfo.Work.Top,
-            monitorInfo.Work.Right,
-            monitorInfo.Work.Bottom);
+        workArea = monitor.WorkArea;
         return true;
+    }
+
+    public bool TryGetMonitor(IntPtr windowHandle, out WindowMonitor monitor)
+    {
+        var monitorHandle = NativeMethods.MonitorFromWindow(windowHandle, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        return TryGetMonitorHandle(monitorHandle, out monitor);
+    }
+
+    public bool TryGetMonitorAtPoint(int x, int y, out WindowMonitor monitor)
+    {
+        var monitorHandle = NativeMethods.MonitorFromPoint(
+            new NativeMethods.Point { X = x, Y = y },
+            NativeMethods.MONITOR_DEFAULTTONEAREST);
+        return TryGetMonitorHandle(monitorHandle, out monitor);
     }
 
     public bool SetWindowPosition(IntPtr windowHandle, WindowRect windowRect) => NativeMethods.SetWindowPos(
@@ -68,4 +83,30 @@ internal sealed class NativeWindowApi : IWindowNativeApi
     public bool ShowWindow(IntPtr windowHandle, uint command) => NativeMethods.ShowWindow(windowHandle, command);
 
     public bool FocusWindow(IntPtr windowHandle) => NativeMethods.SetForegroundWindow(windowHandle);
+
+    private static bool TryGetMonitorHandle(IntPtr monitorHandle, out WindowMonitor monitor)
+    {
+        monitor = default;
+
+        var monitorInfo = new NativeMethods.MonitorInfoEx
+        {
+            Size = (uint)Marshal.SizeOf<NativeMethods.MonitorInfoEx>(),
+            DeviceName = string.Empty
+        };
+
+        if (monitorHandle == IntPtr.Zero || !NativeMethods.GetMonitorInfo(monitorHandle, ref monitorInfo))
+        {
+            return false;
+        }
+
+        monitor = new WindowMonitor(
+            monitorInfo.DeviceName,
+            (monitorInfo.Flags & NativeMethods.MONITORINFOF_PRIMARY) != 0,
+            new WindowRect(
+                monitorInfo.Work.Left,
+                monitorInfo.Work.Top,
+                monitorInfo.Work.Right,
+                monitorInfo.Work.Bottom));
+        return monitor.WorkArea.Width > 0 && monitor.WorkArea.Height > 0;
+    }
 }

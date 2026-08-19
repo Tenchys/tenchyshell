@@ -18,6 +18,10 @@ public sealed class ShellConfiguration
 
     public StatusPanelConfiguration StatusPanel { get; init; } = new();
 
+    public LayoutConfiguration Layout { get; init; } = new();
+
+    public LayoutHotkeyConfiguration LayoutHotkeys { get; init; } = new();
+
     public static ShellConfiguration CreateDefault() => new();
 }
 

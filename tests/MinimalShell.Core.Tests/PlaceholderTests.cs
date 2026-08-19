@@ -4,10 +4,12 @@ using MinimalShell.Core.Commands;
 using MinimalShell.Core.Configuration;
 using MinimalShell.Core.Diagnostics;
 using MinimalShell.Core.Logging;
+using MinimalShell.Core.Layout;
 using MinimalShell.Core.Processes;
 using MinimalShell.Core.Session;
 using MinimalShell.Core.Runtime;
 using MinimalShell.Core.StatusPanel;
+using MinimalShell.Core.Windows;
 
 namespace MinimalShell.Core.Tests;
 
@@ -78,6 +80,182 @@ public sealed class PlaceholderTests
         {
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    [Fact]
+    public void DefaultLayoutUsesOneRowAndTwoColumns()
+    {
+        var catalog = new LayoutZoneCatalog();
+        var zones = catalog.GetZonesForMonitor("\\.\\DISPLAY1", isPrimary: true);
+
+        Assert.Equal(2, zones.Count);
+        Assert.Equal(new LayoutZone(1, "*", 0, 0, 0.5, 1), zones[0]);
+        Assert.Equal(new LayoutZone(2, "*", 0.5, 0, 1, 1), zones[1]);
+    }
+
+    [Fact]
+    public void LayoutCatalogPrefersExactMonitorThenPrimaryThenWildcard()
+    {
+        var zones = new[]
+        {
+            new LayoutZone(1, "*", 0, 0, 1, 1),
+            new LayoutZone(1, "primary", 0, 0, 0.5, 1),
+            new LayoutZone(1, "\\.\\DISPLAY2", 0.5, 0, 1, 1)
+        };
+        var catalog = new LayoutZoneCatalog(zones);
+
+        Assert.Equal(0.5, catalog.GetZonesForMonitor("\\.\\DISPLAY2", false)[0].Left);
+        Assert.Equal(0, catalog.GetZonesForMonitor("\\.\\DISPLAY1", true)[0].Left);
+        Assert.Equal(0, catalog.GetZonesForMonitor("\\.\\DISPLAY3", false)[0].Left);
+    }
+
+    [Fact]
+    public void LayoutZoneCalculatorMapsNormalizedCoordinatesToWorkArea()
+    {
+        var zone = new LayoutZone(1, "*", 0.5, 0, 1, 1);
+
+        var result = LayoutZoneCalculator.ToWindowRect(zone, new WindowRect(-100, 40, 900, 1040));
+
+        Assert.Equal(new WindowRect(400, 40, 900, 1040), result);
+    }
+
+    [Fact]
+    public void LayoutValidatorAllowsTouchingEdgesAndRejectsOverlapAndDuplicates()
+    {
+        var valid = LayoutZoneValidator.Validate(new[]
+        {
+            new LayoutZone(1, "*", 0, 0, 0.5, 1),
+            new LayoutZone(2, "*", 0.5, 0, 1, 1)
+        });
+        var invalid = LayoutZoneValidator.Validate(new[]
+        {
+            new LayoutZone(1, "*", 0, 0, 0.75, 1),
+            new LayoutZone(1, "*", 0.5, 0, 1, 1),
+            new LayoutZone(3, "*", 0, 0, 0.5, 0.5)
+        });
+
+        Assert.True(valid.IsValid, string.Join(Environment.NewLine, valid.Errors));
+        Assert.False(invalid.IsValid);
+        Assert.Contains(invalid.Errors, error => error.Contains("repetida", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(invalid.Errors, error => error.Contains("superponen", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ValidTomlLoadsLayoutZonesAndHotkeys()
+    {
+        var directory = CreateTemporaryDirectory();
+        var path = Path.Combine(directory, "layout.toml");
+
+        try
+        {
+            File.WriteAllText(path, """
+                [layout]
+                enabled = true
+                max_zones = 9
+                default_preset = "1x2"
+                zone_number_size_percent = 6.5
+
+                [[layout.zones]]
+                monitor = "*"
+                number = 1
+                left = 0.0
+                top = 0.0
+                right = 0.5
+                bottom = 1.0
+
+                [[layout.zones]]
+                monitor = "*"
+                number = 2
+                left = 0.5
+                top = 0.0
+                right = 1.0
+                bottom = 1.0
+
+                [hotkeys.layout]
+                zone_1 = "Ctrl+Win+1"
+                drag_modifier = "Ctrl+Shift"
+                """);
+
+            var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
+
+            Assert.True(result.IsValid, string.Join(Environment.NewLine, result.Errors));
+            Assert.Equal("1x2", result.Configuration.Layout.DefaultPreset);
+            Assert.Equal(6.5, result.Configuration.Layout.ZoneNumberSizePercent);
+            Assert.Equal(2, result.Configuration.Layout.Zones.Count);
+            Assert.Equal("Ctrl+Win+1", result.Configuration.LayoutHotkeys.Zones[0]);
+            Assert.Equal("Ctrl+Shift", result.Configuration.LayoutHotkeys.DragModifier);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InvalidLayoutTomlReturnsReadableErrors()
+    {
+        var directory = CreateTemporaryDirectory();
+        var path = Path.Combine(directory, "invalid-layout.toml");
+
+        try
+        {
+            File.WriteAllText(path, """
+                [layout]
+                enabled = true
+                max_zones = 10
+                default_preset = "2x2"
+                zone_number_size_percent = 0
+
+                [[layout.zones]]
+                monitor = "*"
+                number = 1
+                left = 0.0
+                top = 0.0
+                right = 1.2
+                bottom = 1.0
+                """);
+
+            var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
+
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, error => error.Contains("max_zones"));
+            Assert.Contains(result.Errors, error => error.Contains("default_preset"));
+            Assert.Contains(result.Errors, error => error.Contains("zone_number_size_percent"));
+            Assert.Contains(result.Errors, error => error.Contains("geometría"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LayoutDragStateMachineRequiresAWindowAndZoneToComplete()
+    {
+        var state = new LayoutDragStateMachine();
+
+        Assert.False(state.Begin(IntPtr.Zero));
+        Assert.True(state.Begin((IntPtr)123));
+        Assert.False(state.TryComplete(out _, out _));
+        Assert.True(state.SetHoveredZone(2));
+        Assert.True(state.TryComplete(out var window, out var zone));
+        Assert.Equal((IntPtr)123, window);
+        Assert.Equal(2, zone);
+        Assert.False(state.IsDragging);
+    }
+
+    [Fact]
+    public void LayoutDragStateMachineCancelsWithoutChangingTheWindow()
+    {
+        var state = new LayoutDragStateMachine();
+
+        Assert.True(state.Begin((IntPtr)456));
+        Assert.True(state.SetHoveredZone(3));
+        state.Cancel();
+
+        Assert.False(state.IsDragging);
+        Assert.Null(state.HoveredZone);
+        Assert.False(state.TryComplete(out _, out _));
     }
 
     [Fact]
@@ -188,6 +366,8 @@ public sealed class PlaceholderTests
         Assert.True(result.HasMissingDependencies);
         Assert.Contains(result.Diagnostics, diagnostic =>
             diagnostic.Component == "file manager" && !diagnostic.IsAvailable);
+        Assert.Contains(result.Diagnostics, diagnostic =>
+            diagnostic.Component == "layout" && diagnostic.IsAvailable);
         Assert.Equal(4, checker.CheckedCommands.Count);
     }
 

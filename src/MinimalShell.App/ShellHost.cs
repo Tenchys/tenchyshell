@@ -3,6 +3,7 @@ using MinimalShell.Core.Applications;
 using MinimalShell.Core.Commands;
 using MinimalShell.Core.Configuration;
 using MinimalShell.Core.Logging;
+using MinimalShell.Core.Layout;
 using MinimalShell.Core.Processes;
 using MinimalShell.Core.Windows;
 using MinimalShell.Win32;
@@ -30,6 +31,7 @@ internal sealed class ShellHost : IDisposable
     private const int WindowRestoreHotkeyId = 37;
     private const int WindowFocusHotkeyId = 38;
     private const int StatusPanelHotkeyId = 40;
+    private const int LayoutZoneHotkeyStart = 50;
 
     private readonly ShellConfiguration configuration;
     private readonly ILogger logger;
@@ -42,6 +44,8 @@ internal sealed class ShellHost : IDisposable
     private readonly bool stopExplorerAfterHotkeys;
     private readonly WorkspaceManager workspaceManager;
     private readonly StatusPanelWindow? statusPanelWindow;
+    private readonly LayoutZoneCatalog layoutZoneCatalog;
+    private readonly LayoutInteractionHost? layoutInteractionHost;
     private bool isDisposed;
 
     public ShellHost(ShellConfiguration configuration, ILogger logger, bool stopExplorerAfterHotkeys = false)
@@ -49,6 +53,16 @@ internal sealed class ShellHost : IDisposable
         this.configuration = configuration;
         this.logger = logger;
         this.stopExplorerAfterHotkeys = stopExplorerAfterHotkeys;
+
+        if (DpiAwareness.TryEnablePerMonitorV2(out var dpiError))
+        {
+            logger.Info("Conciencia DPI por monitor habilitada.");
+        }
+        else
+        {
+            logger.Error($"No se pudo habilitar la conciencia DPI por monitor: {dpiError}");
+        }
+
         messageLoop = new MessageLoopHost();
         var processLauncher = new ProcessLauncher(logger);
         actions = new ShellActions(configuration, processLauncher, logger);
@@ -59,6 +73,15 @@ internal sealed class ShellHost : IDisposable
         workspaceManager = new WorkspaceManager(new WorkspaceWindowService());
         statusPanelWindow = configuration.StatusPanel.Enabled
             ? new StatusPanelWindow(configuration.StatusPanel, logger)
+            : null;
+        layoutZoneCatalog = new LayoutZoneCatalog(configuration.Layout.Zones, configuration.Layout.MaxZones);
+        layoutInteractionHost = configuration.Layout.Enabled
+            ? new LayoutInteractionHost(
+                messageLoop,
+                windowService,
+                layoutZoneCatalog,
+                configuration.Layout.ZoneNumberSizePercent,
+                logger)
             : null;
     }
 
@@ -83,6 +106,8 @@ internal sealed class ShellHost : IDisposable
             statusPanelWindow?.SetWorkspace(workspaceManager.CurrentWorkspace);
             statusPanelWindow?.Start();
             applicationCatalog.Refresh();
+            var monitors = new MonitorService().GetAll();
+            logger.Info($"Monitores disponibles para layout: {monitors.Count}.");
             logger.Info($"Catálogo de aplicaciones cargado: {applicationCatalog.GetAll().Count} entradas.");
             logger.Info($"MinimalShell iniciado. Terminal configurado: {configuration.Terminal.Command}.");
             logger.Info(stopExplorerAfterHotkeys
@@ -90,7 +115,15 @@ internal sealed class ShellHost : IDisposable
                 : "Modo de desarrollo con Explorer disponible.");
             Console.WriteLine("MinimalShell iniciado. Presiona Ctrl+C para salir durante el desarrollo.");
             Console.WriteLine($"Recuperación: {configuration.Hotkeys.Recovery} inicia explorer.exe.");
-            return messageLoop.Run(stopExplorerAfterHotkeys ? StopExplorerAfterHotkeys : null);
+            return messageLoop.Run(() =>
+            {
+                if (stopExplorerAfterHotkeys)
+                {
+                    StopExplorerAfterHotkeys();
+                }
+
+                layoutInteractionHost?.Start();
+            });
         }
         catch (Exception exception)
         {
@@ -119,6 +152,7 @@ internal sealed class ShellHost : IDisposable
             return;
         }
 
+        layoutInteractionHost?.Dispose();
         statusPanelWindow?.Dispose();
         messageLoop.Dispose();
         launcherWindow.Dispose();
@@ -232,6 +266,17 @@ internal sealed class ShellHost : IDisposable
         {
             ConfigureHotkey(LauncherHotkeyId, "launcher", configuration.Hotkeys.Launcher);
         }
+
+        if (configuration.Layout.Enabled)
+        {
+            for (var zone = 1; zone <= 9; zone++)
+            {
+                ConfigureOptionalHotkey(
+                    LayoutZoneHotkeyStart + zone - 1,
+                    $"layout de la zona {zone}",
+                    configuration.LayoutHotkeys.Zones[zone - 1]);
+            }
+        }
     }
 
     private void ConfigureHotkey(int id, string actionName, string configuredValue, bool required = false)
@@ -250,6 +295,20 @@ internal sealed class ShellHost : IDisposable
             throw new InvalidOperationException(
                 $"El hotkey de {actionName} ('{configuredValue}') entra en conflicto con otra acción configurada.",
                 exception);
+        }
+    }
+
+    private void ConfigureOptionalHotkey(int id, string actionName, string configuredValue)
+    {
+        try
+        {
+            ConfigureHotkey(id, actionName, configuredValue);
+        }
+        catch (InvalidOperationException exception)
+        {
+            var message = $"No se pudo configurar el hotkey opcional de {actionName} ('{configuredValue}'): {exception.Message}";
+            logger.Error(message, exception);
+            Console.Error.WriteLine(message);
         }
     }
 
@@ -317,6 +376,9 @@ internal sealed class ShellHost : IDisposable
                     ? "Panel informativo mostrado mediante hotkey."
                     : "Panel informativo ocultado mediante hotkey.");
                 break;
+            case >= LayoutZoneHotkeyStart and < LayoutZoneHotkeyStart + 9 when configuration.Layout.Enabled:
+                PlaceActiveWindowInZone(id - LayoutZoneHotkeyStart + 1);
+                break;
         }
     }
 
@@ -347,6 +409,9 @@ internal sealed class ShellHost : IDisposable
         >= WorkspaceMoveHotkeyStart and < WorkspaceMoveHotkeyStart + 9 => (
             $"mover al workspace {id - WorkspaceMoveHotkeyStart + 1}",
             configuration.WorkspaceHotkeys.Move[id - WorkspaceMoveHotkeyStart]),
+        >= LayoutZoneHotkeyStart and < LayoutZoneHotkeyStart + 9 => (
+            $"layout de la zona {id - LayoutZoneHotkeyStart + 1}",
+            configuration.LayoutHotkeys.Zones[id - LayoutZoneHotkeyStart]),
         WindowMoveLeftHotkeyId => ("mover ventana a la izquierda", configuration.WindowHotkeys.MoveLeft),
         WindowMoveRightHotkeyId => ("mover ventana a la derecha", configuration.WindowHotkeys.MoveRight),
         WindowMoveUpHotkeyId => ("mover ventana arriba", configuration.WindowHotkeys.MoveUp),
@@ -384,6 +449,26 @@ internal sealed class ShellHost : IDisposable
         {
             logger.Error($"No se pudo mover la ventana activa al workspace {workspace}: {result.Error}");
         }
+    }
+
+    private void PlaceActiveWindowInZone(int zoneNumber)
+    {
+        if (!windowService.TryGetActiveMonitor(out var monitor, out var error))
+        {
+            logger.Error($"No se pudo obtener el monitor para la zona {zoneNumber}: {error}");
+            Console.Error.WriteLine($"No se pudo colocar la ventana en la zona {zoneNumber}: {error}");
+            return;
+        }
+
+        if (!layoutZoneCatalog.TryGetZone(monitor.Id, monitor.IsPrimary, zoneNumber, out var zone))
+        {
+            logger.Error($"No existe una zona de layout numerada {zoneNumber} para el monitor '{monitor.Id}'.");
+            Console.Error.WriteLine($"No existe una zona de layout numerada {zoneNumber} para el monitor '{monitor.Id}'.");
+            return;
+        }
+
+        var targetRect = LayoutZoneCalculator.ToWindowRect(zone, monitor.WorkArea);
+        ReportWindowOperation(windowService.PlaceActiveWindow(targetRect));
     }
 
     private void ReportWindowOperation(WindowOperationResult result)

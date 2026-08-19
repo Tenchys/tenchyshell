@@ -96,3 +96,57 @@ Con MinimalShell ejecutándose y Explorer disponible:
 9. Cierra MinimalShell con `Ctrl+C` y confirma que el panel desaparece sin errores.
 
 Repite la comprobación en una VM o usuario secundario con el perfil `config/MinimalShell.without-explorer.example.toml`.
+
+## Hito 0.6.2 — Colocación por hotkeys
+
+Con MinimalShell ejecutándose y una configuración con `[layout]` habilitado:
+
+1. Abre Notepad y WezTerm.
+2. Pulsa `Ctrl+Win+1`; la ventana activa debe ocupar la mitad izquierda.
+3. Pulsa `Ctrl+Win+2`; la ventana activa debe ocupar la mitad derecha.
+4. Maximiza una ventana y repite el paso anterior; debe restaurarse y colocarse.
+5. Confirma que MinimalShell no roba el foco ni modifica su propio panel o launcher.
+6. Pulsa `Ctrl+Win+3..9`; si no existen zonas configuradas, debe registrarse un mensaje claro sin terminar MinimalShell.
+
+## Hito 0.6.3 — Overlay durante el arrastre
+
+Con MinimalShell ejecutándose y `[layout].enabled = true`:
+
+1. Abre Notepad o WezTerm y realiza un arrastre normal; el overlay no debe aparecer.
+2. Mantén `Ctrl+Shift`, pulsa el botón izquierdo sobre la ventana y arrástrala; debe aparecer el overlay sin robar el foco.
+3. Mueve el cursor entre las zonas; solo la zona bajo el cursor debe resaltarse.
+4. Suelta sobre una zona; la ventana debe restaurarse si estaba maximizada y ocupar esa zona.
+5. Repite el arrastre y pulsa `Escape`; la ventana debe conservar su geometría original.
+6. Repite el arrastre y suelta `Ctrl` o `Shift`; el overlay debe cancelarse sin mover la ventana.
+7. Repite el arrastre y suelta fuera de una zona; no debe cambiar la geometría.
+8. Cierra MinimalShell con `Ctrl+C`; confirma en el log que el overlay desaparece y que los hooks se liberan sin terminar la sesión.
+
+## Hito 0.6.4 — Multi-monitor y DPI
+
+Con dos monitores conectados y `[layout]` habilitado:
+
+1. Ejecuta `--check` y confirma que la configuración es válida.
+2. Define un bloque de zonas con `monitor = "primary"` y otro con el identificador exacto de un monitor, por ejemplo `monitor = '\\.\DISPLAY2'`.
+3. Abre Notepad en cada monitor y aplica `Ctrl+Win+1..9`; cada monitor debe usar su layout correspondiente.
+4. Coloca un monitor a la izquierda del primario y confirma que las ventanas conservan coordenadas negativas válidas.
+5. Repite la prueba arrastrando con `Ctrl+Shift` hacia una zona del monitor secundario.
+6. Confirma que la ventana queda dentro del área de trabajo y no debajo de la taskbar.
+7. Si los monitores tienen escalas DPI distintas, confirma que las zonas mantienen sus proporciones y que el overlay aparece en el monitor correcto.
+8. Repite con `config/MinimalShell.without-explorer.example.toml` en una VM o usuario secundario.
+
+## Hito 0.6.5 — Integración y release
+
+1. Ejecuta `dotnet build MinimalShell.slnx` y confirma cero advertencias y errores.
+2. Ejecuta `dotnet test MinimalShell.slnx` y confirma que Core y Workspaces pasan.
+3. Ejecuta `--check` con ambos TOML de ejemplo; debe mostrar también el diagnóstico `[OK]` de layout.
+4. Genera las publicaciones Debug y Release:
+
+   ```powershell
+   .\scripts\publish.ps1 -Configuration Debug
+   .\scripts\publish.ps1 -Configuration Release
+   ```
+
+5. Ejecuta `--check` usando los TOML copiados dentro de `publish/Debug/win-x64` y `publish/Release/win-x64`.
+6. Inicia la publicación Release, prueba hotkeys, launcher, panel y layout, y ciérrala con `Ctrl+C`.
+7. Confirma en `%LOCALAPPDATA%\MinimalShell\logs\minimalshell.log` que se liberaron hotkeys, hooks y recursos Win32.
+8. Repite el cierre con Explorer activo y en una VM o usuario secundario sin Explorer.

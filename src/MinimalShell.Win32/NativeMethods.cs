@@ -18,6 +18,13 @@ internal static class NativeMethods
     internal const uint WM_TIMER = 0x0113;
     internal const uint WM_NCHITTEST = 0x0084;
     internal const uint WM_MOUSEACTIVATE = 0x0021;
+    internal const uint WM_APP_EXECUTE = 0x8001;
+    internal const uint WM_LBUTTONDOWN = 0x0201;
+    internal const uint WM_LBUTTONUP = 0x0202;
+    internal const uint WM_MOUSEMOVE = 0x0200;
+    internal const uint WM_KEYUP = 0x0101;
+    internal const uint WM_SYSKEYDOWN = 0x0104;
+    internal const uint WM_SYSKEYUP = 0x0105;
 
     internal const uint MOD_ALT = 0x0001;
     internal const uint MOD_CONTROL = 0x0002;
@@ -30,6 +37,12 @@ internal static class NativeMethods
     internal const int VK_ESCAPE = 0x1B;
     internal const int VK_UP = 0x26;
     internal const int VK_DOWN = 0x28;
+    internal const int VK_SHIFT = 0x10;
+    internal const int VK_CONTROL = 0x11;
+    internal const int VK_LSHIFT = 0xA0;
+    internal const int VK_RSHIFT = 0xA1;
+    internal const int VK_LCONTROL = 0xA2;
+    internal const int VK_RCONTROL = 0xA3;
 
     internal const uint SW_SHOW = 5;
     internal const uint SW_SHOWNOACTIVATE = 4;
@@ -47,6 +60,23 @@ internal static class NativeMethods
     internal const int COLOR_WINDOW = 5;
     internal const int HTTRANSPARENT = -1;
     internal const int MA_NOACTIVATE = 3;
+    internal const uint WS_EX_LAYERED = 0x00080000;
+    internal const uint WS_EX_TRANSPARENT = 0x00000020;
+    internal const uint LWA_ALPHA = 0x00000002;
+    internal const int WH_KEYBOARD_LL = 13;
+    internal const int WH_MOUSE_LL = 14;
+    internal const uint MONITORINFOF_PRIMARY = 0x00000001;
+    internal const uint GA_ROOT = 2;
+    internal static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
+    internal const uint DEFAULT_CHARSET = 1;
+    internal const uint OUT_DEFAULT_PRECIS = 0;
+    internal const uint CLIP_DEFAULT_PRECIS = 0;
+    internal const uint CLEARTYPE_QUALITY = 5;
+    internal const uint DEFAULT_PITCH = 0;
+    internal const uint FF_DONTCARE = 0;
+    internal const uint DT_CENTER = 0x00000001;
+    internal const uint DT_VCENTER = 0x00000004;
+    internal const uint DT_SINGLELINE = 0x00000020;
 
     internal static readonly IntPtr HWND_TOPMOST = new(-1);
 
@@ -57,6 +87,16 @@ internal static class NativeMethods
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    internal delegate bool MonitorEnumProc(
+        IntPtr monitor,
+        IntPtr deviceContext,
+        ref Rect monitorRectangle,
+        IntPtr data);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    internal delegate IntPtr LowLevelHookProc(int code, IntPtr wParam, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     internal struct WindowClass
@@ -110,6 +150,37 @@ internal static class NativeMethods
         internal Rect Monitor;
         internal Rect Work;
         internal uint Flags;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    internal struct MonitorInfoEx
+    {
+        internal uint Size;
+        internal Rect Monitor;
+        internal Rect Work;
+        internal uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        internal string DeviceName;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct LowLevelMouseHookData
+    {
+        internal Point Point;
+        internal uint MouseData;
+        internal uint Flags;
+        internal uint Time;
+        internal IntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct LowLevelKeyboardHookData
+    {
+        internal uint VirtualKeyCode;
+        internal uint ScanCode;
+        internal uint Flags;
+        internal uint Time;
+        internal IntPtr ExtraInfo;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -181,6 +252,22 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo monitorInfo);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMonitorInfoW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx monitorInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnumDisplayMonitors(
+        IntPtr deviceContext,
+        IntPtr clippingRectangle,
+        MonitorEnumProc callback,
+        IntPtr data);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int index);
 
@@ -202,6 +289,27 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr MonitorFromPoint(Point point, uint flags);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr SetWindowsHookEx(
+        int hookType,
+        LowLevelHookProc hookProcedure,
+        IntPtr moduleHandle,
+        uint threadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool UnhookWindowsHookEx(IntPtr hookHandle);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr CallNextHookEx(IntPtr hookHandle, int code, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    internal static extern short GetAsyncKeyState(int virtualKey);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint colorKey, byte alpha, uint flags);
+
     [DllImport("user32.dll")]
     internal static extern IntPtr BeginPaint(IntPtr hWnd, out PaintStruct paintStruct);
 
@@ -214,6 +322,26 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")]
     internal static extern IntPtr CreateSolidBrush(uint color);
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "CreateFontW")]
+    internal static extern IntPtr CreateFont(
+        int height,
+        int width,
+        int escapement,
+        int orientation,
+        int weight,
+        byte italic,
+        byte underline,
+        byte strikeOut,
+        uint characterSet,
+        uint outputPrecision,
+        uint clipPrecision,
+        uint quality,
+        uint pitchAndFamily,
+        string faceName);
+
+    [DllImport("gdi32.dll")]
+    internal static extern IntPtr SelectObject(IntPtr deviceContext, IntPtr graphicsObject);
 
     [DllImport("gdi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -233,6 +361,14 @@ internal static class NativeMethods
         int y,
         string text,
         int length);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int DrawText(
+        IntPtr deviceContext,
+        string text,
+        int characterCount,
+        ref Rect rectangle,
+        uint format);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -262,6 +398,12 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr WindowFromPoint(Point point);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

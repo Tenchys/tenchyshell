@@ -95,6 +95,84 @@ public sealed class WindowService : IWindowService
             : WindowOperationResult.Failure("Windows no permitió enfocar la ventana activa.");
     }
 
+    public bool TryGetActiveWorkArea(out WindowRect workArea, out string? error)
+    {
+        workArea = default;
+
+        if (!TryGetActiveMonitor(out var monitor, out error))
+        {
+            return false;
+        }
+
+        workArea = monitor.WorkArea;
+        return true;
+    }
+
+    public bool TryGetActiveMonitor(out WindowMonitor monitor, out string? error)
+    {
+        monitor = default;
+
+        if (!TryGetActiveWindow(out var windowHandle, out error))
+        {
+            return false;
+        }
+
+        if (!nativeApi.TryGetMonitor(windowHandle, out monitor))
+        {
+            error = "No se pudo obtener el monitor de la ventana activa.";
+            return false;
+        }
+
+        return true;
+    }
+
+    public WindowOperationResult PlaceActiveWindow(WindowRect targetRect)
+    {
+        if (!TryGetActiveWindow(out var windowHandle, out var error))
+        {
+            return WindowOperationResult.Failure(error!);
+        }
+
+        return PlaceWindow(windowHandle, targetRect);
+    }
+
+    public WindowOperationResult PlaceWindow(IntPtr windowHandle, WindowRect targetRect)
+    {
+        if (targetRect.Width <= 0 || targetRect.Height <= 0)
+        {
+            return WindowOperationResult.Failure("La zona calculada no tiene un tamaño válido.");
+        }
+
+        if (windowHandle == IntPtr.Zero || !nativeApi.IsWindow(windowHandle))
+        {
+            return WindowOperationResult.Failure("La ventana objetivo no es válida.");
+        }
+
+        if (nativeApi.GetWindowProcessId(windowHandle) == currentProcessId)
+        {
+            return WindowOperationResult.Failure("La ventana objetivo pertenece a MinimalShell y no se modificará.");
+        }
+
+        var centerX = targetRect.Left + targetRect.Width / 2;
+        var centerY = targetRect.Top + targetRect.Height / 2;
+        if (!nativeApi.TryGetMonitorAtPoint(centerX, centerY, out var targetMonitor) &&
+            !nativeApi.TryGetMonitor(windowHandle, out targetMonitor))
+        {
+            return WindowOperationResult.Failure("No se pudo obtener el monitor destino de la ventana.");
+        }
+
+        var workArea = targetMonitor.WorkArea;
+        var width = Math.Min(targetRect.Width, workArea.Width);
+        var height = Math.Min(targetRect.Height, workArea.Height);
+        var left = Clamp(targetRect.Left, workArea.Left, workArea.Right - width);
+        var top = Clamp(targetRect.Top, workArea.Top, workArea.Bottom - height);
+        var clampedRect = new WindowRect(left, top, left + width, top + height);
+
+        // ShowWindow devuelve el estado anterior de la ventana, no un indicador fiable de error.
+        nativeApi.ShowWindow(windowHandle, NativeMethods.SW_RESTORE);
+        return SetWindowPosition(windowHandle, clampedRect);
+    }
+
     private WindowOperationResult ShowActiveWindow(uint command)
     {
         if (!TryGetActiveWindow(out var windowHandle, out var error))
@@ -113,9 +191,19 @@ public sealed class WindowService : IWindowService
         ? WindowOperationResult.Success()
         : WindowOperationResult.Failure("Windows no permitió cambiar la geometría de la ventana activa.");
 
-    private bool TryGetActiveWindow(out IntPtr windowHandle, out string? error)
+    public bool TryGetActiveWindow(out IntPtr windowHandle, out string? error)
     {
-        windowHandle = nativeApi.GetForegroundWindow();
+        return TryValidateWindow(nativeApi.GetForegroundWindow(), out windowHandle, out error);
+    }
+
+    public bool TryGetWindowAtPoint(int x, int y, out IntPtr windowHandle, out string? error)
+    {
+        return TryValidateWindow(nativeApi.GetWindowFromPoint(x, y), out windowHandle, out error);
+    }
+
+    private bool TryValidateWindow(IntPtr candidate, out IntPtr windowHandle, out string? error)
+    {
+        windowHandle = candidate;
         error = null;
 
         if (windowHandle == IntPtr.Zero || !nativeApi.IsWindow(windowHandle))

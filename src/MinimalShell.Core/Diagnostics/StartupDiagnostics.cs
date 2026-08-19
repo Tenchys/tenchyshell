@@ -1,4 +1,5 @@
 using MinimalShell.Core.Configuration;
+using MinimalShell.Core.Layout;
 using Microsoft.Win32;
 
 namespace MinimalShell.Core.Diagnostics;
@@ -135,7 +136,8 @@ public static class StartupDiagnostics
             Check("terminal", configuration.Terminal.Command, availabilityChecker),
             Check("shell de comandos", configuration.Terminal.CommandShell, availabilityChecker),
             Check("file manager", configuration.FileManager.Command, availabilityChecker),
-            Check("navegador", configuration.Applications.Browser, availabilityChecker)
+            Check("navegador", configuration.Applications.Browser, availabilityChecker),
+            CheckLayout(configuration)
         };
 
         return new StartupDiagnosticsResult(diagnostics);
@@ -146,4 +148,25 @@ public static class StartupDiagnostics
         string command,
         ICommandAvailabilityChecker availabilityChecker) =>
         new(component, command, availabilityChecker.IsAvailable(command));
+
+    private static StartupDiagnostic CheckLayout(ShellConfiguration configuration)
+    {
+        if (!configuration.Layout.Enabled)
+        {
+            return new StartupDiagnostic("layout", "deshabilitado", true);
+        }
+
+        var validation = LayoutZoneValidator.Validate(
+            configuration.Layout.Zones,
+            configuration.Layout.MaxZones);
+        var validPreset = string.Equals(
+            configuration.Layout.DefaultPreset,
+            "1x2",
+            StringComparison.OrdinalIgnoreCase);
+        var validLabelSize = configuration.Layout.ZoneNumberSizePercent is > 0 and <= 25;
+        var isAvailable = validation.IsValid && validPreset && validLabelSize;
+        var description = $"{configuration.Layout.Zones.Count} zonas; preset {configuration.Layout.DefaultPreset}";
+
+        return new StartupDiagnostic("layout", description, isAvailable);
+    }
 }

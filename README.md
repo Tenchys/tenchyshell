@@ -2,9 +2,11 @@
 
 Shell minimalista para Windows 11 Pro, orientado al teclado y diseñado para reducir la dependencia cotidiana de `explorer.exe` sin reemplazar el compositor DWM ni la compatibilidad con aplicaciones Win32.
 
+MinimalShell fue desarrollado con asistencia de OpenAI Codex, manteniendo una arquitectura pequeña, nativa y enfocada en la recuperación segura de la sesión.
+
 ## Estado actual
 
-El MVP 0.5 incluye configuración TOML, logging, diagnóstico de dependencias, message loop Win32, recuperación de Explorer, launcher nativo, workspaces, gestión básica de ventanas, panel informativo, hotkeys configurables y cierre cooperativo de la ventana activa. La aplicación mantiene una única instancia por sesión.
+El MVP 0.6.5 incluye configuración TOML, logging, diagnóstico de dependencias y layout, message loop Win32, recuperación de Explorer, launcher nativo, workspaces, gestión básica de ventanas, panel informativo, hotkeys configurables, zonas multi-monitor con overlay de arrastre y cierre cooperativo de la ventana activa. La aplicación mantiene una única instancia por sesión.
 
 ## Requisitos
 
@@ -12,6 +14,46 @@ El MVP 0.5 incluye configuración TOML, logging, diagnóstico de dependencias, m
 - .NET SDK 10.0 o posterior compatible con `net10.0`.
 - PowerShell.
 - WezTerm y Yazi para las pruebas de integración.
+
+## Instalación
+
+MinimalShell todavía no incluye un instalador MSI. La instalación consiste en generar o descargar una publicación `win-x64` y conservar todos sus archivos en una carpeta estable.
+
+### Desde el código fuente
+
+Requiere el SDK de .NET 10:
+
+```powershell
+git clone https://github.com/Tenchys/tenchyshell.git
+Set-Location tenchyshell
+dotnet restore MinimalShell.slnx
+dotnet build MinimalShell.slnx -c Release
+.\scripts\publish.ps1 -Configuration Release
+```
+
+La publicación queda en:
+
+```text
+publish\Release\win-x64\
+```
+
+Puedes copiar esa carpeta, por ejemplo, a:
+
+```text
+%LOCALAPPDATA%\MinimalShell\
+```
+
+### Ejecutar la instalación publicada
+
+Desde la carpeta publicada:
+
+```powershell
+dotnet MinimalShell.dll MinimalShell.example.toml
+```
+
+La publicación actual es dependiente del runtime: necesita tener instalado el runtime de .NET 10. Para desarrollo, el SDK de .NET 10 ya incluye lo necesario.
+
+No uses `--without-explorer` en la sesión principal. Ese modo debe probarse únicamente en una VM o usuario secundario.
 
 ## Comandos de desarrollo
 
@@ -58,6 +100,28 @@ La compilación debe finalizar sin advertencias ni errores. Las pruebas no deben
 
 `--check` comprueba que estén disponibles el terminal, el shell de comandos, Yazi y el navegador configurado. Las ausencias se reportan como advertencias y no impiden el arranque normal; el modo de comprobación termina con código `2` si falta alguna dependencia.
 
+## Configuración TOML y ubicación predeterminada
+
+La aplicación no carga automáticamente un archivo TOML si se inicia sin argumentos: en ese caso usa los valores incorporados en el código. Para una instalación publicada, la ubicación recomendada del archivo de configuración es junto al ejecutable:
+
+```text
+%LOCALAPPDATA%\MinimalShell\MinimalShell.example.toml
+```
+
+En una publicación generada desde este repositorio, el archivo se copia automáticamente a:
+
+```text
+publish\Release\win-x64\MinimalShell.example.toml
+```
+
+El archivo `MinimalShell.without-explorer.example.toml` es el perfil de prueba sin Explorer. MinimalShell acepta cualquier ruta TOML como primer argumento:
+
+```powershell
+dotnet MinimalShell.dll C:\ruta\MinimalShell.toml
+```
+
+Si no se proporciona una ruta, la aplicación usa los valores incorporados en el código; no modifica ni crea archivos TOML automáticamente. Los comentarios de los archivos de ejemplo describen cada opción, incluidas hotkeys, terminal, panel, zonas y tamaño proporcional de los números del overlay.
+
 ## Estructura
 
 ```text
@@ -88,6 +152,7 @@ Los valores de `[hotkeys]` en el TOML se registran al iniciar el shell. Las comb
 - `Ctrl+Alt+Shift+E`: recuperación, inicia `explorer.exe`.
 - `Ctrl+Alt+1..9`: cambiar al workspace 1..9.
 - `Ctrl+Alt+Shift+1..9`: mover la ventana activa al workspace 1..9.
+- `Ctrl+Win+1..9`: colocar la ventana activa en la zona de layout configurada.
 
 `Win+Q` solicita el cierre normal de la ventana activa. Las aplicaciones pueden mostrar sus propios diálogos de guardado; MinimalShell nunca termina el proceso de forma forzada.
 
@@ -103,6 +168,34 @@ Detén cualquier instancia anterior de MinimalShell y vuelve a iniciarla con ese
 Los hotkeys de workspaces se configuran en `[hotkeys.workspaces]` mediante `switch_1` a `switch_9` y `move_1` a `move_9`.
 
 Las operaciones básicas de ventana usan `[hotkeys.window]`: flechas para mover, `resize_grow`/`resize_shrink` para cambiar tamaño, `maximize`, `restore` y `focus`. Las operaciones respetan el área de trabajo del monitor y no terminan procesos.
+
+El layout inicial se define en `[layout]` y usa dos columnas con una fila (`1x2`). Las zonas se expresan con coordenadas normalizadas y las hotkeys se configuran en `[hotkeys.layout]`. El layout selecciona el monitor exacto, `primary` o `*`, y usa el área de trabajo real con DPI por monitor. Durante el arrastre, `Ctrl+Shift` muestra un overlay click-through y permite soltar la ventana en la zona resaltada.
+
+## Funciones principales
+
+- Lanzamiento del terminal configurado, Yazi y navegador.
+- Launcher nativo para buscar aplicaciones instaladas y aplicaciones MSIX.
+- Ejecución de comandos `!comando` en PowerShell interactivo dentro de WezTerm.
+- Workspaces 1..9, cambio de workspace y traslado de ventanas.
+- Movimiento, redimensionamiento, maximización, restauración y foco de ventanas.
+- Layout por zonas con `Ctrl+Win+1..9`.
+- Overlay de arrastre con `Ctrl+Shift` para seleccionar una zona visualmente.
+- Layouts independientes por monitor, coordenadas negativas y DPI por monitor.
+- Panel informativo auto-ocultable con workspace y hora local.
+- Cierre cooperativo de la ventana activa.
+- Recuperación mediante `explorer.exe`.
+- Acciones de sesión para cerrar sesión, apagar o reiniciar, siempre con `--confirm`.
+- Diagnóstico de dependencias y logs en `%LOCALAPPDATA%\MinimalShell\logs\`.
+
+La aplicación no reemplaza permanentemente Winlogon, no implementa una taskbar propia y no incluye búsqueda web, plugins ni un administrador de archivos interno.
+
+Para validar o publicar el MVP 0.6:
+
+```powershell
+dotnet test MinimalShell.slnx
+.\scripts\publish.ps1 -Configuration Release
+dotnet publish\Release\win-x64\MinimalShell.dll --check publish\Release\win-x64\MinimalShell.example.toml
+```
 
 ## Panel informativo
 
@@ -170,7 +263,5 @@ La prueba sin Explorer debe hacerse únicamente en una máquina virtual o con un
 ## Seguridad durante el desarrollo
 
 No cambiar permanentemente la configuración de Winlogon. Las pruebas sin `explorer.exe` deben realizarse primero en una máquina virtual o con un usuario secundario y siempre debe conservarse una ruta para iniciar `explorer.exe` manualmente.
-
-Consulta [`AGENTS.md`](AGENTS.md) para las reglas completas del proyecto y [`plan.md`](plan.md) para la secuencia de hitos.
 
 La verificación manual completa y las limitaciones conocidas están en [`docs/MANUAL_TESTING.md`](docs/MANUAL_TESTING.md).

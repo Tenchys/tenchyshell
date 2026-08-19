@@ -25,6 +25,35 @@ height = 96
 edge_zone = 4
 monitor = "primary"
 
+[layout]
+# Habilita el layout de ventanas. El preset 1x2 significa 1 fila y 2 columnas.
+enabled = true
+max_zones = 9
+default_preset = "1x2"
+# Tamaño de los números del overlay como porcentaje del lado menor del monitor.
+# 4.0 produce una etiqueta grande y proporcional en distintas resoluciones.
+zone_number_size_percent = 4.0
+
+# Las coordenadas son relativas al área de trabajo y van de 0.0 a 1.0.
+# monitor = "*" aplica a todos los monitores sin layout específico.
+# También puedes usar monitor = "primary" o un identificador exacto como
+# monitor = '\\.\DISPLAY2' para definir un layout por monitor.
+[[layout.zones]]
+monitor = "*"
+number = 1
+left = 0.0
+top = 0.0
+right = 0.5
+bottom = 1.0
+
+[[layout.zones]]
+monitor = "*"
+number = 2
+left = 0.5
+top = 0.0
+right = 1.0
+bottom = 1.0
+
 [hotkeys]
 terminal = "Ctrl+Alt+Enter"
 files = "Ctrl+Alt+E"
@@ -63,3 +92,17 @@ resize_shrink = "Ctrl+Alt+Shift+Left"
 maximize = "Ctrl+Alt+M"
 restore = "Ctrl+Alt+R"
 focus = "Ctrl+Alt+F"
+
+[hotkeys.layout]
+# Cada hotkey coloca la ventana activa en la zona con el mismo número.
+zone_1 = "Ctrl+Win+1"
+zone_2 = "Ctrl+Win+2"
+zone_3 = "Ctrl+Win+3"
+zone_4 = "Ctrl+Win+4"
+zone_5 = "Ctrl+Win+5"
+zone_6 = "Ctrl+Win+6"
+zone_7 = "Ctrl+Win+7"
+zone_8 = "Ctrl+Win+8"
+zone_9 = "Ctrl+Win+9"
+# Modificadores usados durante el arrastre para mostrar el overlay.
+drag_modifier = "Ctrl+Shift"
