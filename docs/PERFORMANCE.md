@@ -173,9 +173,20 @@ El modo interno `--automated-benchmark` solo es válido junto con
 `--without-explorer` y `--exit-after-seconds`; TenchyShell restaura Explorer en
 su bloque `finally`. El orquestador también mantiene una recuperación externa
 y marca la captura inválida si necesita forzar el cierre de su propio proceso.
-El cierre de Explorer se verifica dentro de la sesión actual y contempla de
-forma acotada un relanzamiento automático de Windows. El log debe confirmar
-que se liberaron hotkeys y recursos.
+TenchyShell identifica `Shell_TrayWnd`, comprueba que pertenece al único
+`explorer.exe` de la sesión y solicita la misma salida cooperativa que ofrece la
+barra de tareas. No termina Explorer a la fuerza: exige que permanezca ausente
+durante dos segundos y cancela la captura si Windows lo relanza, si el HWND no
+coincide o si el mensaje deja de ser compatible con una versión futura. Este
+mensaje de la shell no es un contrato público de Win32, por lo que dicha
+validación y la recuperación posterior son requisitos del instrumental. El log
+debe confirmar que se liberaron hotkeys y recursos.
+
+Si aparece `TenchyShell no alcanzó el estado estable sin Explorer`, no se debe
+repetir la captura con una publicación antigua: actualizar el repositorio,
+publicar de nuevo desde el commit limpio y ejecutar el smoke test. El mecanismo
+anterior de cierre forzado provocaba que Winlogon relanzara Explorer y quedó
+retirado del protocolo.
 
 El informe también puede regenerarse explícitamente:
 

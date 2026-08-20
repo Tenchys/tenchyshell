@@ -57,6 +57,7 @@ internal sealed class ShellHost : IDisposable
     private readonly SystemTrayScriptRunner systemTrayScriptRunner;
     private readonly WallpaperService wallpaperService;
     private readonly IWallpaperStateStore wallpaperStateStore;
+    private readonly ExplorerShellController explorerShellController;
     private bool isDisposed;
 
     public ShellHost(ShellConfiguration configuration, ILogger logger, bool stopExplorerAfterHotkeys = false)
@@ -99,6 +100,7 @@ internal sealed class ShellHost : IDisposable
             : null;
         systemTrayScriptRunner = new SystemTrayScriptRunner();
         wallpaperStateStore = new WallpaperStateStore();
+        explorerShellController = new ExplorerShellController();
         wallpaperService = new WallpaperService(configuration.Wallpaper, wallpaperStateStore, logger);
         systemTrayService = new SystemTrayService(
             configuration,
@@ -275,94 +277,14 @@ internal sealed class ShellHost : IDisposable
 
     private void StopExplorerAfterHotkeys()
     {
-        const int maximumPasses = 3;
-        for (var pass = 1; pass <= maximumPasses; pass++)
+        logger.Info("El modo sin Explorer solicitará la salida cooperativa del shell tras registrar el hotkey de recuperación.");
+        var result = explorerShellController.TryExitCurrentSession();
+        if (!result.Succeeded)
         {
-            var explorers = GetCurrentSessionExplorerProcesses();
-            if (explorers.Length == 0)
-            {
-                Thread.Sleep(1500);
-                explorers = GetCurrentSessionExplorerProcesses();
-                if (explorers.Length == 0)
-                {
-                    logger.Info($"El modo sin Explorer quedó estable tras {pass - 1} pasada(s) de cierre.");
-                    return;
-                }
-            }
-
-            logger.Info(pass == 1
-                ? $"El modo sin Explorer cerrará {explorers.Length} proceso(s) explorer.exe tras registrar el hotkey de recuperación."
-                : $"Windows relanzó explorer.exe; pasada de cierre adicional {pass}/{maximumPasses} ({explorers.Length} proceso(s)).");
-
-            foreach (var explorer in explorers)
-            {
-                try
-                {
-                    if (explorer.CloseMainWindow())
-                    {
-                        explorer.WaitForExit(3000);
-                    }
-
-                    if (!explorer.HasExited)
-                    {
-                        explorer.Kill();
-                        explorer.WaitForExit(3000);
-                    }
-
-                    if (explorer.HasExited)
-                    {
-                        logger.Info($"Se cerró explorer.exe (PID: {explorer.Id}).");
-                    }
-                    else
-                    {
-                        logger.Error($"explorer.exe (PID: {explorer.Id}) no terminó dentro del tiempo de espera.");
-                    }
-                }
-                catch (Exception exception)
-                {
-                    logger.Error($"No se pudo cerrar explorer.exe (PID: {explorer.Id}).", exception);
-                    Console.Error.WriteLine($"No se pudo cerrar explorer.exe (PID: {explorer.Id}): {exception.Message}");
-                }
-                finally
-                {
-                    explorer.Dispose();
-                }
-            }
-
-            Thread.Sleep(500);
+            throw new InvalidOperationException(result.Message);
         }
 
-        Thread.Sleep(1500);
-        var remainingExplorers = GetCurrentSessionExplorerProcesses();
-        if (remainingExplorers.Length > 0)
-        {
-            foreach (var explorer in remainingExplorers) explorer.Dispose();
-            throw new InvalidOperationException(
-                "Windows continuó relanzando explorer.exe después de tres pasadas; se canceló el modo sin Explorer.");
-        }
-
-        logger.Info("El modo sin Explorer quedó estable después de la última pasada de cierre.");
-    }
-
-    private static Process[] GetCurrentSessionExplorerProcesses()
-    {
-        using var current = Process.GetCurrentProcess();
-        var sessionId = current.SessionId;
-        var allExplorers = Process.GetProcessesByName("explorer");
-        var matching = new List<Process>();
-        foreach (var explorer in allExplorers)
-        {
-            try
-            {
-                if (explorer.SessionId == sessionId) matching.Add(explorer);
-                else explorer.Dispose();
-            }
-            catch
-            {
-                explorer.Dispose();
-            }
-        }
-        return matching.ToArray();
+        logger.Info($"{result.Message} PID cerrado: {result.ProcessId}.");
     }
 
     private void ConfigureHotkeys()

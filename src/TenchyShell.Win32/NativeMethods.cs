@@ -27,6 +27,7 @@ internal static class NativeMethods
     internal const uint WM_KEYUP = 0x0101;
     internal const uint WM_SYSKEYDOWN = 0x0104;
     internal const uint WM_SYSKEYUP = 0x0105;
+    internal const uint WM_USER = 0x0400;
 
     internal const uint MOD_ALT = 0x0001;
     internal const uint MOD_CONTROL = 0x0002;
@@ -477,6 +478,9 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr FindWindow(string? className, string? windowName);
 
     [DllImport("user32.dll")]
     internal static extern IntPtr GetForegroundWindow();
