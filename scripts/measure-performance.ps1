@@ -234,11 +234,12 @@ function Get-NormalizedProcessName([string]$Name) {
 
 function Get-GitMetadata {
     $repoRoot = Split-Path -Parent $PSScriptRoot
+    $safeRepoRoot = $repoRoot.Replace('\', '/')
     $commit = $null
     $dirty = $null
     try {
-        $commit = (& git -C $repoRoot rev-parse HEAD 2>$null)
-        $dirty = [bool](& git -C $repoRoot status --porcelain 2>$null)
+        $commit = (& git -c "safe.directory=$safeRepoRoot" -C $repoRoot rev-parse HEAD 2>$null)
+        $dirty = [bool](& git -c "safe.directory=$safeRepoRoot" -C $repoRoot status --porcelain 2>$null)
     } catch {
         # El benchmark tambien puede ejecutarse desde una publicacion sin Git.
     }

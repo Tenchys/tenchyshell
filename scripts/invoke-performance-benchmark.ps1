@@ -162,9 +162,10 @@ function Read-ReleaseManifest {
     if ([int]$manifest.schemaVersion -ne 1 -or $manifest.configuration -ne "Release" -or $manifest.runtime -ne "win-x64") {
         throw "benchmark-release.json no describe una publicación Release win-x64 compatible."
     }
-    $commit = (& git -C $repoRoot rev-parse HEAD 2>$null)
+    $safeRepoRoot = $repoRoot.Replace('\', '/')
+    $commit = (& git -c "safe.directory=$safeRepoRoot" -C $repoRoot rev-parse HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) { throw "No se pudo identificar el commit actual." }
-    $dirty = [bool](& git -C $repoRoot status --porcelain 2>$null)
+    $dirty = [bool](& git -c "safe.directory=$safeRepoRoot" -C $repoRoot status --porcelain 2>$null)
     if (-not $SmokeTest -and $dirty) { throw "El benchmark oficial requiere un árbol Git limpio." }
     if ([string]$manifest.gitCommit -ne [string]$commit -or [bool]$manifest.gitDirty) {
         throw "La publicación no corresponde al commit limpio actual. Ejecuta .\scripts\publish.ps1 después del commit."

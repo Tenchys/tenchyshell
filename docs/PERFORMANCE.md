@@ -41,6 +41,8 @@ Antes de comenzar:
 El inicio de sesión permanece manual para no almacenar credenciales ni cambiar
 Winlogon. Desde ese momento toda la captura es automática: preparación,
 estabilización, acciones, validaciones, cierre y recuperación de Explorer.
+Las consultas a Git confían temporalmente solo en la ruta exacta del checkout;
+no requieren modificar `safe.directory` en la configuración global del usuario.
 
 El JSON registra commit, estado del árbol, Windows/build, CPU, RAM, plan de
 energía, batería/CA, usuario y geometría/DPI efectivo de los monitores. El

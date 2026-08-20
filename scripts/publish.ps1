@@ -20,9 +20,10 @@ Copy-Item (Join-Path $repoRoot "config\TenchyShell.without-explorer.example.toml
 
 $gitCommit = $null
 $gitDirty = $null
+$safeRepoRoot = $repoRoot.Replace('\', '/')
 try {
-    $gitCommit = (& git -C $repoRoot rev-parse HEAD 2>$null)
-    $gitDirty = [bool](& git -C $repoRoot status --porcelain 2>$null)
+    $gitCommit = (& git -c "safe.directory=$safeRepoRoot" -C $repoRoot rev-parse HEAD 2>$null)
+    $gitDirty = [bool](& git -c "safe.directory=$safeRepoRoot" -C $repoRoot status --porcelain 2>$null)
 } catch {
     # Una publicación fuera del checkout sigue siendo válida para uso normal,
     # pero el orquestador oficial rechazará un manifiesto sin commit.
