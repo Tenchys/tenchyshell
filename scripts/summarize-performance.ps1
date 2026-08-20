@@ -123,6 +123,16 @@ foreach ($file in $files) {
         if ([string]::IsNullOrWhiteSpace([string]$data.batchId)) {
             throw "El archivo oficial '$($file.FullName)' no contiene batchId."
         }
+        if ($null -eq $data.orchestration -or [string]$data.orchestration.mode -ne "Automated" -or
+            [int]$data.orchestration.version -ne 1 -or -not [bool]$data.orchestration.completed) {
+            throw "El archivo oficial '$($file.FullName)' no fue completado por el orquestador automatizado compatible."
+        }
+        if ([string]$data.orchestration.releaseGitCommit -ne [string]$data.environment.gitCommit) {
+            throw "El archivo oficial '$($file.FullName)' no corresponde a la publicación Release del commit medido."
+        }
+        if (-not [bool]$data.settings.stressActionsAutomated) {
+            throw "El archivo oficial '$($file.FullName)' no declara acciones de estrés automatizadas."
+        }
     } elseif (-not $AllowSmokeTest) {
         throw "El archivo '$($file.FullName)' es un smoke test. Usa -AllowSmokeTest para analizarlo fuera del informe oficial."
     } elseif ([int]$data.settings.repetitions -ne 1) {
@@ -176,6 +186,7 @@ foreach ($file in $files) {
         workflowCloseSecond = $data.settings.workflowCloseSecond
         workflowVerifyClosedSecond = $data.settings.workflowVerifyClosedSecond
         stressActionSeconds = $data.settings.stressActionSeconds
+        stressActionsAutomated = $data.settings.stressActionsAutomated
         externalCpuThresholdPercent = $data.settings.externalCpuThresholdPercent
         externalCpuConsecutiveSeconds = $data.settings.externalCpuConsecutiveSeconds
     })
@@ -328,6 +339,7 @@ $report.Add("- El recolector introduce una pequena carga observadora y debe ejec
 $report.Add("- Explorer representa exclusivamente explorer.exe. Los hosts auxiliares de Windows se registran como externos y no se atribuyen a Explorer.")
 $report.Add("- TenchyShell incluye el coste de su proceso .NET; WezTerm/Yazi se presentan por separado y tambien dentro del total.")
 $report.Add("- TenchyShellStress no tiene equivalente Explorer y nunca participa en los deltas comparativos.")
+$report.Add("- Las cinco capturas fueron preparadas por el orquestador y las acciones de estrés se inyectaron y validaron automáticamente.")
 $report.Add("- El lote se acepta como linea base si las capturas son validas, la funcionalidad se conserva y cualquier crecimiento repetido de recursos queda explicado o registrado como seguimiento.")
 
 $content = $report -join [Environment]::NewLine

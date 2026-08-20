@@ -33,6 +33,8 @@ param(
 
     [int[]]$StressActionSeconds = @(5, 10, 15, 20, 25),
 
+    [switch]$ManualStressActions,
+
     [string]$ToolCommand = "wezterm-gui.exe",
 
     [string[]]$ToolArguments = @("start", "--always-new-process", "--", "yazi.exe"),
@@ -75,6 +77,12 @@ if ($SmokeTest) {
 if ($AllowExistingToolsForSmoke -and -not $SmokeTest) {
     throw "-AllowExistingToolsForSmoke solo puede usarse junto con -SmokeTest."
 }
+if ($ManualStressActions -and $Phase -ne "TenchyShellStress") {
+    throw "-ManualStressActions solo puede usarse con TenchyShellStress."
+}
+if ($ManualStressActions -and -not $SmokeTest) {
+    throw "Las capturas oficiales de TenchyShellStress deben usar acciones automatizadas."
+}
 if (-not $SmokeTest -and [string]::IsNullOrWhiteSpace($BatchId)) {
     throw "Una captura oficial requiere -BatchId para agrupar exactamente los cinco escenarios."
 }
@@ -97,15 +105,18 @@ if ($Phase -eq "TenchyShellStress") {
     }
 }
 
-if ($Phase -eq "CommonWorkflow") {
+if ($Phase -in @("CommonWorkflow", "TenchyShellStress")) {
     if (-not ("TenchyShellBenchmarkInput" -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 public static class TenchyShellBenchmarkInput
 {
+    private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
 
@@ -114,6 +125,15 @@ public static class TenchyShellBenchmarkInput
 
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, StringBuilder className, int maximumCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr window);
 
     public static bool TrySendQuit(IntPtr window)
     {
@@ -126,9 +146,85 @@ public static class TenchyShellBenchmarkInput
         keybd_event(Q, 0, KeyUp, UIntPtr.Zero);
         return true;
     }
+
+    public static bool TrySendCtrlAlt(byte virtualKey)
+    {
+        const byte Control = 0x11;
+        const byte Alt = 0x12;
+        const uint KeyUp = 0x0002;
+        keybd_event(Control, 0, 0, UIntPtr.Zero);
+        keybd_event(Alt, 0, 0, UIntPtr.Zero);
+        keybd_event(virtualKey, 0, 0, UIntPtr.Zero);
+        keybd_event(virtualKey, 0, KeyUp, UIntPtr.Zero);
+        keybd_event(Alt, 0, KeyUp, UIntPtr.Zero);
+        keybd_event(Control, 0, KeyUp, UIntPtr.Zero);
+        return true;
+    }
+
+    public static bool TrySendEscape()
+    {
+        const byte Escape = 0x1B;
+        const uint KeyUp = 0x0002;
+        keybd_event(Escape, 0, 0, UIntPtr.Zero);
+        keybd_event(Escape, 0, KeyUp, UIntPtr.Zero);
+        return true;
+    }
+
+    public static bool WaitForTrayVisibility(bool expectedVisible, int timeoutMilliseconds)
+    {
+        var deadline = Environment.TickCount64 + timeoutMilliseconds;
+        do
+        {
+            if (IsTrayVisible() == expectedVisible) return true;
+            Thread.Sleep(25);
+        }
+        while (Environment.TickCount64 < deadline);
+        return IsTrayVisible() == expectedVisible;
+    }
+
+    private static bool IsTrayVisible()
+    {
+        var found = false;
+        EnumWindows(delegate(IntPtr window, IntPtr parameter)
+        {
+            var className = new StringBuilder(128);
+            if (GetClassName(window, className, className.Capacity) > 0 &&
+                className.ToString().StartsWith("TenchyShell.SystemTray.", StringComparison.Ordinal) &&
+                IsWindowVisible(window))
+            {
+                found = true;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
 }
 '@
     }
+}
+
+function Wait-ForLogMessage([string]$Path, [long]$Offset, [string]$Expected, [int]$TimeoutMilliseconds = 1000) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    do {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $stream = $null
+            $reader = $null
+            try {
+                $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                if ($Offset -le $stream.Length) {
+                    [void]$stream.Seek($Offset, [IO.SeekOrigin]::Begin)
+                    $reader = [IO.StreamReader]::new($stream)
+                    if ($reader.ReadToEnd().IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) { return $true }
+                }
+            } finally {
+                if ($null -ne $reader) { $reader.Dispose() }
+                elseif ($null -ne $stream) { $stream.Dispose() }
+            }
+        }
+        Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
 }
 
 function Get-NormalizedProcessName([string]$Name) {
@@ -486,6 +582,10 @@ for ($repetition = 1; $repetition -le $Repetitions; $repetition++) {
     $workflowCloseRequested = $false
     $workflowVerified = $false
     $workflowClass = "TenchyShellBenchmark-$collectorProcessId-$repetition"
+    $stressLogPath = Join-Path $env:LOCALAPPDATA "TenchyShell\logs\tenchyshell.log"
+    $stressLogOffset = if (Test-Path -LiteralPath $stressLogPath -PathType Leaf) {
+        (Get-Item -LiteralPath $stressLogPath).Length
+    } else { 0L }
     $initialToolIds = [Collections.Generic.HashSet[int]]::new()
     foreach ($tool in @(Get-ToolRootProcesses)) { [void]$initialToolIds.Add([int]$tool.Id) }
     if ($Phase -ne "Idle" -and $initialToolIds.Count -gt 0 -and -not $AllowExistingToolsForSmoke) {
@@ -553,9 +653,64 @@ for ($repetition = 1; $repetition -le $Repetitions; $repetition++) {
                 $scheduled = $StressActionSeconds[$actionIndex]
                 $alreadyEmitted = @($events | Where-Object { $_.actionIndex -eq $actionIndex }).Count -gt 0
                 if (-not $alreadyEmitted -and $elapsedSeconds -ge $scheduled) {
-                    Write-Host "[$scheduled s] $($actions[$actionIndex])"
-                    try { [Console]::Beep(900 + ($actionIndex * 100), 120) } catch { }
-                    $events.Add([ordered]@{ action = $actions[$actionIndex]; actionIndex = $actionIndex; scheduledSecond = $scheduled; emittedAtSecond = $elapsedSeconds })
+                    $succeeded = $null
+                    $actionError = $null
+                    if ($ManualStressActions) {
+                        Write-Host "[$scheduled s] $($actions[$actionIndex])"
+                        try { [Console]::Beep(900 + ($actionIndex * 100), 120) } catch { }
+                    } else {
+                        try {
+                            switch ($actionIndex) {
+                                0 {
+                                    [void][TenchyShellBenchmarkInput]::TrySendCtrlAlt(0x54)
+                                    $succeeded = [TenchyShellBenchmarkInput]::WaitForTrayVisibility($true, 1000)
+                                    if (-not $succeeded) { $actionError = "El dock no quedó visible tras Ctrl+Alt+T." }
+                                }
+                                1 {
+                                    [void][TenchyShellBenchmarkInput]::TrySendEscape()
+                                    $succeeded = [TenchyShellBenchmarkInput]::WaitForTrayVisibility($false, 1000)
+                                    if (-not $succeeded) { $actionError = "El dock no se ocultó tras Escape." }
+                                }
+                                2 {
+                                    [void][TenchyShellBenchmarkInput]::TrySendCtrlAlt(0x32)
+                                    $succeeded = Wait-ForLogMessage $stressLogPath $stressLogOffset "Workspace activo: 2."
+                                    if (-not $succeeded) { $actionError = "No se confirmó el cambio automatizado al workspace 2." }
+                                }
+                                3 {
+                                    [void][TenchyShellBenchmarkInput]::TrySendCtrlAlt(0x31)
+                                    $succeeded = Wait-ForLogMessage $stressLogPath $stressLogOffset "Workspace activo: 1."
+                                    if (-not $succeeded) { $actionError = "No se confirmó el retorno automatizado al workspace 1." }
+                                }
+                                4 {
+                                    [void][TenchyShellBenchmarkInput]::TrySendCtrlAlt(0x54)
+                                    $opened = [TenchyShellBenchmarkInput]::WaitForTrayVisibility($true, 1000)
+                                    if ($opened) {
+                                        [void][TenchyShellBenchmarkInput]::TrySendEscape()
+                                    }
+                                    $closed = $opened -and [TenchyShellBenchmarkInput]::WaitForTrayVisibility($false, 1000)
+                                    $succeeded = $closed
+                                    if (-not $succeeded) { $actionError = "No se confirmó el segundo ciclo automatizado de apertura y cierre del dock." }
+                                }
+                            }
+                        } catch {
+                            $succeeded = $false
+                            $actionError = $_.Exception.Message
+                        }
+
+                        Write-Host "[$scheduled s] Automatizado: $($actions[$actionIndex]) — $(if ($succeeded) { 'OK' } else { 'ERROR' })"
+                        if (-not $succeeded) {
+                            Add-Reason $runReasons "Falló la acción automatizada '$($actions[$actionIndex])': $actionError"
+                        }
+                    }
+                    $events.Add([ordered]@{
+                        action = $actions[$actionIndex]
+                        actionIndex = $actionIndex
+                        scheduledSecond = $scheduled
+                        emittedAtSecond = $elapsedSeconds
+                        automated = -not [bool]$ManualStressActions
+                        succeeded = $succeeded
+                        error = $actionError
+                    })
                 }
             }
         }
@@ -606,6 +761,7 @@ $result = [ordered]@{
         workflowCloseSecond = $WorkflowCloseSecond
         workflowVerifyClosedSecond = $WorkflowVerifyClosedSecond
         stressActionSeconds = @($StressActionSeconds)
+        stressActionsAutomated = -not [bool]$ManualStressActions
         externalCpuThresholdPercent = $ExternalCpuThresholdPercent
         externalCpuConsecutiveSeconds = $ExternalCpuConsecutiveSeconds
     }

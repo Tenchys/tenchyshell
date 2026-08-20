@@ -3,6 +3,7 @@ param()
 
 $ErrorActionPreference = "Stop"
 $summarizer = Join-Path $PSScriptRoot "summarize-performance.ps1"
+$orchestrator = Join-Path $PSScriptRoot "invoke-performance-benchmark.ps1"
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("TenchyShell.Performance.Tests." + [Guid]::NewGuid().ToString("N"))
 
 function New-Sample([string]$Scenario, [double]$ShellCpu, [double]$ToolCpu, [int]$ShellCount = 1) {
@@ -83,6 +84,7 @@ function New-Capture([string]$Scenario, [string]$Phase, [bool]$Official = $true)
             workflowCloseSecond = 20
             workflowVerifyClosedSecond = 25
             stressActionSeconds = @(5, 10, 15, 20, 25)
+            stressActionsAutomated = $true
             externalCpuThresholdPercent = 5
             externalCpuConsecutiveSeconds = 10
         }
@@ -100,6 +102,15 @@ function New-Capture([string]$Scenario, [string]$Phase, [bool]$Official = $true)
             displays = @([ordered]@{ deviceName = "DISPLAY1"; primary = $true; width = 1920; height = 1080; dpi = 96 })
             gitCommit = "0123456789012345678901234567890123456789"
             gitDirty = $false
+        }
+        orchestration = [ordered]@{
+            mode = "Automated"
+            version = 1
+            shellLifecycleManaged = $Scenario -eq "TenchyShell"
+            idleToolManaged = $Phase -eq "Idle"
+            releaseGitCommit = "0123456789012345678901234567890123456789"
+            completed = $true
+            errors = @()
         }
         runs = $runs
     }
@@ -181,11 +192,44 @@ try {
     [void](Write-Capture $mixedSettingsDirectory "b" $settingsB)
     Assert-Throws { & $summarizer -InputPath $mixedSettingsDirectory -AllowSmokeTest } "ajustes de medicion diferentes"
 
+    $manualActions = New-Capture "TenchyShell" "TenchyShellStress" $false
+    $automatedActions = New-Capture "TenchyShell" "Idle" $false
+    $manualActions.settings.stressActionsAutomated = $false
+    $mixedActionsDirectory = Join-Path $testRoot "mixed-actions"
+    [void](Write-Capture $mixedActionsDirectory "manual" $manualActions)
+    [void](Write-Capture $mixedActionsDirectory "automated" $automatedActions)
+    Assert-Throws { & $summarizer -InputPath $mixedActionsDirectory -AllowSmokeTest } "ajustes de medicion diferentes"
+
     $shortOfficial = New-Capture "TenchyShell" "Idle" $true
     $shortOfficial.settings.repetitions = 1
     $shortOfficial.runs = @($shortOfficial.runs[0])
     $shortPath = Write-Capture $invalidDirectory "short-official" $shortOfficial
     Assert-Throws { & $summarizer -InputPath $shortPath } "menos de cinco"
+
+    $manualOfficial = New-Capture "TenchyShell" "Idle" $true
+    $manualOfficial.orchestration = $null
+    $manualOfficialPath = Write-Capture $invalidDirectory "manual-official" $manualOfficial
+    Assert-Throws { & $summarizer -InputPath $manualOfficialPath } "orquestador automatizado"
+
+    $wrongRelease = New-Capture "TenchyShell" "Idle" $true
+    $wrongRelease.orchestration.releaseGitCommit = "different"
+    $wrongReleasePath = Write-Capture $invalidDirectory "wrong-release" $wrongRelease
+    Assert-Throws { & $summarizer -InputPath $wrongReleasePath } "publicación Release"
+
+    $manualStressOfficial = New-Capture "TenchyShell" "TenchyShellStress" $true
+    $manualStressOfficial.settings.stressActionsAutomated = $false
+    $manualStressPath = Write-Capture $invalidDirectory "manual-stress-official" $manualStressOfficial
+    Assert-Throws { & $summarizer -InputPath $manualStressPath } "acciones de estrés automatizadas"
+
+    $smokePlan = @(& $orchestrator -SmokeTest -PlanOnly)
+    if ($smokePlan.Count -ne 3 -or $smokePlan[0].Phase -ne "Idle" -or $smokePlan[2].Phase -ne "TenchyShellStress") {
+        throw "El plan automatizado de smoke tests no contiene las tres fases en el orden esperado."
+    }
+    $officialPlan = @(& $orchestrator -BatchId ("synthetic-" + [Guid]::NewGuid().ToString("N")) -PlanOnly)
+    if ($officialPlan.Count -ne 1 -or $officialPlan[0].Scenario -ne "Explorer" -or $officialPlan[0].Phase -ne "Idle") {
+        throw "El plan oficial automatizado no comienza con Explorer/Idle."
+    }
+    Assert-Throws { & $orchestrator -BatchId "invalid batch" -PlanOnly } "BatchId"
 
     Write-Host "Instrumental de rendimiento: pruebas sinteticas y negativas superadas."
 } finally {

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using TenchyShell.Core.Configuration;
 using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.Logging;
@@ -23,12 +24,20 @@ internal static class Program
         var launchIndex = Array.FindIndex(args, argument => argument.Equals("--launch", StringComparison.OrdinalIgnoreCase));
         var sessionIndex = Array.FindIndex(args, argument => argument.Equals("--session", StringComparison.OrdinalIgnoreCase));
         var withoutExplorer = args.Any(argument => argument.Equals("--without-explorer", StringComparison.OrdinalIgnoreCase));
+        var automatedBenchmark = HasArgument(args, "--automated-benchmark");
         var checkOnly = HasArgument(args, "--check");
         if (!TryGetOptionalPositiveInteger(args, "--exit-after-seconds", 3600, out var exitAfterSeconds, out var optionError))
         {
             Console.Error.WriteLine(optionError);
             return 1;
         }
+
+        if (automatedBenchmark && (!withoutExplorer || !exitAfterSeconds.HasValue))
+        {
+            Console.Error.WriteLine("--automated-benchmark requiere --without-explorer y --exit-after-seconds.");
+            return 1;
+        }
+
         var configurationPath = GetConfigurationPath(args);
         var result = new TomlConfigurationProvider(logger).Load(configurationPath);
 
@@ -94,10 +103,15 @@ internal static class Program
             return 0;
         }
 
-        if (withoutExplorer && !ConfirmExplorerShutdown())
+        if (withoutExplorer && !automatedBenchmark && !ConfirmExplorerShutdown())
         {
             Console.Error.WriteLine("Inicio cancelado: explorer.exe no fue cerrado.");
             return 1;
+        }
+
+        if (automatedBenchmark)
+        {
+            logger.Info($"Benchmark automatizado solicitado; Explorer se restaurará al finalizar en un máximo de {exitAfterSeconds} segundos.");
         }
 
         if (!SingleInstanceGuard.TryAcquire("Local\\MinimalShell.SingleInstance", out var legacyInstanceGuard))
@@ -117,11 +131,21 @@ internal static class Program
             return 1;
         }
 
-        using (legacyInstanceGuard!)
-        using (instanceGuard!)
+        try
         {
-            using var shell = new ShellHost(result.Configuration, logger, withoutExplorer);
-            return shell.Run(exitAfterSeconds);
+            using (legacyInstanceGuard!)
+            using (instanceGuard!)
+            {
+                using var shell = new ShellHost(result.Configuration, logger, withoutExplorer);
+                return shell.Run(exitAfterSeconds);
+            }
+        }
+        finally
+        {
+            if (automatedBenchmark)
+            {
+                EnsureExplorerRunning(logger);
+            }
         }
     }
 
@@ -136,6 +160,32 @@ internal static class Program
         Console.WriteLine("ADVERTENCIA: se cerrará explorer.exe después de registrar los hotkeys.");
         Console.WriteLine("Usa una VM o un usuario secundario. Escribe DETENER para continuar:");
         return string.Equals(Console.ReadLine()?.Trim(), "DETENER", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnsureExplorerRunning(ILogger logger)
+    {
+        var current = Process.GetProcessesByName("explorer");
+        if (current.Length > 0)
+        {
+            foreach (var process in current) process.Dispose();
+            logger.Info("Recuperación automática del benchmark: explorer.exe ya estaba activo.");
+            return;
+        }
+
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                UseShellExecute = true
+            });
+            logger.Info($"Recuperación automática del benchmark: explorer.exe iniciado (PID: {process?.Id.ToString() ?? "desconocido"}).");
+        }
+        catch (Exception exception)
+        {
+            logger.Error("La recuperación automática del benchmark no pudo iniciar explorer.exe.", exception);
+            Console.Error.WriteLine($"No se pudo restaurar explorer.exe: {exception.Message}");
+        }
     }
 
     private static string? GetConfigurationPath(IReadOnlyList<string> args)
@@ -238,11 +288,13 @@ internal static class Program
         Console.WriteLine("  TenchyShell.exe --launch terminal|files|browser [config.toml]");
         Console.WriteLine("  TenchyShell.exe --without-explorer [config.toml]");
         Console.WriteLine("  TenchyShell.exe --exit-after-seconds N [config.toml]");
+        Console.WriteLine("  TenchyShell.exe --automated-benchmark --without-explorer --exit-after-seconds N [config.toml]");
         Console.WriteLine("  TenchyShell.exe --session logout|shutdown|restart --confirm [config.toml]");
         Console.WriteLine();
         Console.WriteLine("--check valida dependencias y configuración sin registrar hotkeys ni cerrar Explorer.");
         Console.WriteLine("--without-explorer requiere confirmación y solo debe usarse en una VM o usuario secundario.");
         Console.WriteLine("--exit-after-seconds cierra limpiamente una sesión de benchmark o integración.");
+        Console.WriteLine("--automated-benchmark exige un cierre acotado y restaura Explorer al terminar.");
     }
 
     private static TenchyShell.Core.Processes.ProcessLaunchResult ExecuteLaunchAction(

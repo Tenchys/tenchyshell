@@ -33,9 +33,14 @@ Antes de comenzar:
 4. Cerrar navegador, sincronizadores y aplicaciones voluntarias; mantener
    activos los mecanismos de seguridad.
 5. Cerrar sesión y volver a entrar antes de cada captura. Preparar el escenario
-   y dejarlo cinco minutos en reposo antes de iniciar el recolector.
+   ejecutando el orquestador; este espera cinco minutos antes de iniciar el
+   recolector.
 6. Ejecutar el recolector desde una consola diferente de WezTerm, porque esa
    consola es carga observadora y no forma parte de la medición.
+
+El inicio de sesión permanece manual para no almacenar credenciales ni cambiar
+Winlogon. Desde ese momento toda la captura es automática: preparación,
+estabilización, acciones, validaciones, cierre y recuperación de Explorer.
 
 El JSON registra commit, estado del árbol, Windows/build, CPU, RAM, plan de
 energía, batería/CA, usuario y geometría/DPI efectivo de los monitores. El
@@ -77,14 +82,17 @@ diez segundos de calentamiento y quince segundos de reposo entre repeticiones.
 
 ### Idle
 
-Debe existir una instancia de WezTerm con Yazi antes de medir. Se mantiene
-abierta y sin interacción durante toda la captura:
+El orquestador exige comenzar sin WezTerm/Yazi, abre una instancia identificada
+y la mantiene sin interacción durante toda la captura:
 
 ```powershell
 wezterm-gui.exe start --always-new-process -- yazi.exe
 ```
 
-El recolector rechaza `Idle` si no encuentra ambos procesos.
+El recolector rechaza `Idle` si no encuentra ambos procesos. Al terminar, el
+orquestador enfoca exclusivamente su ventana, solicita `q` a Yazi y comprueba
+el cierre normal; nunca termina procesos ajenos ni fuerza el cierre de la
+herramienta.
 
 ### CommonWorkflow
 
@@ -101,8 +109,8 @@ JSON como inválido.
 
 ### TenchyShellStress
 
-Solo es válido para TenchyShell. El recolector muestra y marca acústicamente el
-guion; el operador ejecuta:
+Solo es válido para TenchyShell. El recolector inyecta el guion con tiempos
+fijos y valida cada resultado:
 
 - segundo 5: `Ctrl+Alt+T`, abrir dock;
 - segundo 10: `Escape`, cerrar dock;
@@ -110,60 +118,60 @@ guion; el operador ejecuta:
 - segundo 20: `Ctrl+Alt+1`, volver al workspace 1;
 - segundo 25: `Ctrl+Alt+T` y `Escape`, abrir y cerrar el dock.
 
+La apertura y el cierre se comprueban mediante la ventana Win32 propia del
+dock. Los cambios de workspace se confirman en el log generado después del
+inicio de cada repetición. Una tecla emitida sin el efecto esperado invalida la
+captura. `-ManualStressActions` queda reservado a smoke tests de diagnóstico y
+no se admite en datos oficiales.
+
 ## Ejecución oficial
 
 Publicar y comprobar una única vez:
 
 ```powershell
 .\scripts\publish.ps1 -Configuration Release
-dotnet .\publish\TenchyShell\Release\win-x64\TenchyShell.dll `
+& .\publish\TenchyShell\Release\win-x64\TenchyShell.exe `
   --check .\publish\TenchyShell\Release\win-x64\TenchyShell.example.toml
 ```
 
-En cada sesión TenchyShell del usuario secundario:
+La publicación incluye `benchmark-release.json`. El orquestador rechaza un
+árbol sucio, un manifiesto de otra publicación o un commit distinto.
+
+Primero, en una sesión del usuario secundario, ejecutar los tres smoke tests:
 
 ```powershell
-dotnet .\publish\TenchyShell\Release\win-x64\TenchyShell.dll `
-  --without-explorer `
-  .\publish\TenchyShell\Release\win-x64\TenchyShell.without-explorer.example.toml
+.\scripts\invoke-performance-benchmark.ps1 -SmokeTest
 ```
 
-Escribir `DETENER`, confirmar que `explorer.exe` desaparece y conservar abierta
-esa consola. En las sesiones Explorer, no iniciar TenchyShell.
+No se pulsa ninguna tecla ni se prepara manualmente WezTerm/Yazi durante los
+smoke tests. Si una fase falla, se detiene la suite, se conserva la captura como
+inválida cuando existe y se restaura Explorer.
 
-Ejecutar exactamente en este orden, cerrando y reabriendo la sesión entre
-comandos. Sustituir el identificador por el elegido para el lote:
+Para la sesión oficial, cerrar y volver a iniciar sesión antes de cada captura.
+Ejecutar siempre el mismo comando; el orquestador inspecciona el lote y elige
+la siguiente combinación en el orden equilibrado definido por el protocolo:
+
+```powershell
+.\scripts\invoke-performance-benchmark.ps1 -BatchId "20260820-release-a"
+```
+
+El orden automático es Explorer/Idle, TenchyShell/Idle,
+TenchyShell/CommonWorkflow, Explorer/CommonWorkflow y
+TenchyShell/TenchyShellStress. Cada ejecución espera cinco minutos, realiza
+cinco repeticiones, cierra solo los procesos propios y restaura Explorer. Al
+final informa cuál será la captura siguiente. Tras la quinta ejecución genera
+`summary.md` automáticamente.
+
+El modo interno `--automated-benchmark` solo es válido junto con
+`--without-explorer` y `--exit-after-seconds`; TenchyShell restaura Explorer en
+su bloque `finally`. El orquestador también mantiene una recuperación externa
+y marca la captura inválida si necesita forzar el cierre de su propio proceso.
+El log debe confirmar que se liberaron hotkeys y recursos.
+
+El informe también puede regenerarse explícitamente:
 
 ```powershell
 $benchmarkBatch = "20260820-release-a"
-
-# 1. Explorer / Idle; preparar WezTerm+Yazi y esperar cinco minutos.
-.\scripts\measure-performance.ps1 `
-  -BatchId $benchmarkBatch -Scenario Explorer -Phase Idle
-
-# 2. TenchyShell / Idle; preparar WezTerm+Yazi y esperar cinco minutos.
-.\scripts\measure-performance.ps1 `
-  -BatchId $benchmarkBatch -Scenario TenchyShell -Phase Idle
-
-# 3. TenchyShell / CommonWorkflow; comenzar sin WezTerm/Yazi.
-.\scripts\measure-performance.ps1 `
-  -BatchId $benchmarkBatch -Scenario TenchyShell -Phase CommonWorkflow
-
-# 4. Explorer / CommonWorkflow; comenzar sin WezTerm/Yazi.
-.\scripts\measure-performance.ps1 `
-  -BatchId $benchmarkBatch -Scenario Explorer -Phase CommonWorkflow
-
-# 5. TenchyShell / TenchyShellStress; comenzar sin WezTerm/Yazi.
-.\scripts\measure-performance.ps1 `
-  -BatchId $benchmarkBatch -Scenario TenchyShell -Phase TenchyShellStress
-```
-
-Después de cerrar TenchyShell, revisar
-`%LOCALAPPDATA%\TenchyShell\logs\tenchyshell.log` y confirmar que liberó
-hotkeys y recursos. Generar el informe seleccionando solo el directorio del
-lote:
-
-```powershell
 $batchPath = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v2\$benchmarkBatch"
 .\scripts\summarize-performance.ps1 `
   -InputPath $batchPath `
@@ -171,7 +179,8 @@ $batchPath = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v2\$benchmarkBa
 ```
 
 El resumidor exige las cinco combinaciones, una captura por combinación, cinco
-repeticiones válidas, árbol limpio, mismo commit, entorno, ajustes y lote.
+repeticiones válidas, árbol limpio, misma publicación/commit, entorno, ajustes,
+lote y orquestación automática completada.
 
 ## Pruebas del instrumental
 
@@ -183,17 +192,13 @@ incompleta, menos de cinco repeticiones y entornos mezclados:
 .\scripts\test-performance.ps1
 ```
 
-`-SmokeTest` permite exactamente una repetición no oficial. El resumidor la
-rechaza salvo que se solicite explícitamente `-AllowSmokeTest`. Para reducir la
-duración se pueden ajustar las marcas manteniendo su orden:
-
-En una sesión de desarrollo que ya tenga WezTerm abierto puede añadirse
-`-AllowExistingToolsForSmoke`. Esta excepción nunca es válida para una captura
-oficial y el cierre automatizado se limita a los procesos creados por el
-workflow.
+`-SmokeTest` en el orquestador ejecuta automáticamente una repetición corta de
+cada fase. El resumidor la rechaza salvo que se solicite explícitamente
+`-AllowSmokeTest`. Para diagnósticos de bajo nivel, el recolector conserva sus
+parámetros individuales:
 
 ```powershell
-# Requiere WezTerm/Yazi ya abiertos.
+# Diagnóstico directo; el flujo normal usa invoke-performance-benchmark.ps1.
 .\scripts\measure-performance.ps1 -SmokeTest -Repetitions 1 `
   -Scenario TenchyShell -Phase Idle -WarmupSeconds 0 `
   -SamplesPerRepetition 7 -InterRepetitionSeconds 0
@@ -210,12 +215,16 @@ workflow.
   -StressActionSeconds 1,2,3,4,5
 ```
 
+El primer ejemplo directo de `Idle` requiere preparar WezTerm/Yazi y existe
+solo para investigar el recolector. No forma parte del procedimiento oficial.
+
 ## Criterio de aceptación
 
 Esta primera comparativa establece una línea base, no un presupuesto ni la
 obligación de superar a Explorer en todas las métricas. Se acepta cuando:
 
 - las cinco capturas superan todas las validaciones automáticas;
+- no se requirió ninguna interacción durante cada captura;
 - no hay bloqueos ni regresiones funcionales;
 - el log confirma cierre limpio;
 - cualquier crecimiento repetido de memoria, handles o hilos queda explicado
