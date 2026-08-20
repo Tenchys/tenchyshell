@@ -1,12 +1,16 @@
-# MinimalShell
+# TenchyShell
 
 Shell minimalista para Windows 11 Pro, orientado al teclado y diseñado para reducir la dependencia cotidiana de `explorer.exe` sin reemplazar el compositor DWM ni la compatibilidad con aplicaciones Win32.
 
-MinimalShell fue desarrollado con asistencia de OpenAI Codex, manteniendo una arquitectura pequeña, nativa y enfocada en la recuperación segura de la sesión.
+TenchyShell fue desarrollado con asistencia de OpenAI Codex, manteniendo una arquitectura pequeña, nativa y enfocada en la recuperación segura de la sesión.
 
 ## Estado actual
 
-El MVP 0.6.5 incluye configuración TOML, logging, diagnóstico de dependencias y layout, message loop Win32, recuperación de Explorer, launcher nativo, workspaces, gestión básica de ventanas, panel informativo, hotkeys configurables, zonas multi-monitor con overlay de arrastre y cierre cooperativo de la ventana activa. La aplicación mantiene una única instancia por sesión.
+El MVP 0.7.6 consolida el producto bajo el nombre TenchyShell. Incluye el
+message loop Win32, recuperación de Explorer, launcher, workspaces, gestión y
+layout de ventanas, panel, bandeja propia, red, fondos e idioma de teclado. La
+aplicación mantiene una única instancia compatible con el mutex heredado y las
+consultas de red del dock se ejecutan fuera del message loop.
 
 ## Requisitos
 
@@ -17,7 +21,7 @@ El MVP 0.6.5 incluye configuración TOML, logging, diagnóstico de dependencias 
 
 ## Instalación
 
-MinimalShell todavía no incluye un instalador MSI. La instalación consiste en generar o descargar una publicación `win-x64` y conservar todos sus archivos en una carpeta estable.
+TenchyShell todavía no incluye un instalador MSI. La instalación consiste en generar o descargar una publicación `win-x64` y conservar todos sus archivos en una carpeta estable.
 
 ### Desde el código fuente
 
@@ -26,21 +30,21 @@ Requiere el SDK de .NET 10:
 ```powershell
 git clone https://github.com/Tenchys/tenchyshell.git
 Set-Location tenchyshell
-dotnet restore MinimalShell.slnx
-dotnet build MinimalShell.slnx -c Release
+dotnet restore TenchyShell.slnx
+dotnet build TenchyShell.slnx -c Release
 .\scripts\publish.ps1 -Configuration Release
 ```
 
 La publicación queda en:
 
 ```text
-publish\Release\win-x64\
+publish\TenchyShell\Release\win-x64\
 ```
 
 Puedes copiar esa carpeta, por ejemplo, a:
 
 ```text
-%LOCALAPPDATA%\MinimalShell\
+%LOCALAPPDATA%\TenchyShell\
 ```
 
 ### Ejecutar la instalación publicada
@@ -48,7 +52,7 @@ Puedes copiar esa carpeta, por ejemplo, a:
 Desde la carpeta publicada:
 
 ```powershell
-dotnet MinimalShell.dll MinimalShell.example.toml
+dotnet TenchyShell.dll TenchyShell.example.toml
 ```
 
 La publicación actual es dependiente del runtime: necesita tener instalado el runtime de .NET 10. Para desarrollo, el SDK de .NET 10 ya incluye lo necesario.
@@ -61,37 +65,40 @@ Ejecutar desde la raíz del repositorio:
 
 ```powershell
 # Restaurar dependencias
-dotnet restore MinimalShell.slnx
+dotnet restore TenchyShell.slnx
 
 # Compilar todos los proyectos
-dotnet build MinimalShell.slnx
+dotnet build TenchyShell.slnx
 
 # Ejecutar las pruebas
-dotnet test MinimalShell.slnx
+dotnet test TenchyShell.slnx
 
 # Ejecutar la aplicación mínima
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj
 
 # Ejecutar usando un archivo TOML específico
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- config/MinimalShell.example.toml
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- config/TenchyShell.example.toml
 
 # Diagnosticar configuración y dependencias sin iniciar el shell
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --check config/MinimalShell.example.toml
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --check config/TenchyShell.example.toml
+
+# Ejecutar una sesión acotada que se cierra limpiamente (benchmarks/integración)
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --exit-after-seconds 60 config/TenchyShell.example.toml
 
 # Probar un lanzamiento concreto sin iniciar el message loop
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --launch terminal
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --launch files
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --launch browser
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --launch terminal
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --launch files
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --launch browser
 
 # Acciones de sesión: requieren confirmación explícita y cierran/reinician la sesión real
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --session logout --confirm
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --session shutdown --confirm
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --session restart --confirm
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --session logout --confirm
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --session shutdown --confirm
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --session restart --confirm
 
 # Publicar el ejecutable para Windows x64
-dotnet publish src/MinimalShell.App/MinimalShell.App.csproj -c Release -r win-x64 --self-contained false
+dotnet publish src/TenchyShell.App/TenchyShell.App.csproj -c Release -r win-x64 --self-contained false
 
-# Publicar en publish/Debug/win-x64 o publish/Release/win-x64
+# Publicar en publish/TenchyShell/Debug/win-x64 o publish/TenchyShell/Release/win-x64
 .\scripts\publish.ps1 -Configuration Debug
 .\scripts\publish.ps1 -Configuration Release
 ```
@@ -105,19 +112,19 @@ La compilación debe finalizar sin advertencias ni errores. Las pruebas no deben
 La aplicación no carga automáticamente un archivo TOML si se inicia sin argumentos: en ese caso usa los valores incorporados en el código. Para una instalación publicada, la ubicación recomendada del archivo de configuración es junto al ejecutable:
 
 ```text
-%LOCALAPPDATA%\MinimalShell\MinimalShell.example.toml
+%LOCALAPPDATA%\TenchyShell\TenchyShell.example.toml
 ```
 
 En una publicación generada desde este repositorio, el archivo se copia automáticamente a:
 
 ```text
-publish\Release\win-x64\MinimalShell.example.toml
+publish\TenchyShell\Release\win-x64\TenchyShell.example.toml
 ```
 
-El archivo `MinimalShell.without-explorer.example.toml` es el perfil de prueba sin Explorer. MinimalShell acepta cualquier ruta TOML como primer argumento:
+El archivo `TenchyShell.without-explorer.example.toml` es el perfil de prueba sin Explorer. TenchyShell acepta cualquier ruta TOML como primer argumento:
 
 ```powershell
-dotnet MinimalShell.dll C:\ruta\MinimalShell.toml
+dotnet TenchyShell.dll C:\ruta\TenchyShell.toml
 ```
 
 Si no se proporciona una ruta, la aplicación usa los valores incorporados en el código; no modifica ni crea archivos TOML automáticamente. Los comentarios de los archivos de ejemplo describen cada opción, incluidas hotkeys, terminal, panel, zonas y tamaño proporcional de los números del overlay.
@@ -125,11 +132,11 @@ Si no se proporciona una ruta, la aplicación usa los valores incorporados en el
 ## Estructura
 
 ```text
-src/MinimalShell.App          Ciclo de vida y composición de la aplicación
-src/MinimalShell.Core         Dominio independiente de Windows
-src/MinimalShell.Win32        Interoperabilidad nativa encapsulada
-src/MinimalShell.Workspaces   Workspaces y gestión futura de ventanas
-src/MinimalShell.UI           UI futura, inicialmente reservada
+src/TenchyShell.App          Ciclo de vida y composición de la aplicación
+src/TenchyShell.Core         Dominio independiente de Windows
+src/TenchyShell.Win32        Interoperabilidad nativa encapsulada
+src/TenchyShell.Workspaces   Workspaces y gestión futura de ventanas
+src/TenchyShell.UI           UI futura, inicialmente reservada
 tests/                         Pruebas automatizadas
 config/                        Configuraciones de ejemplo
 logs/                          Marcador de la carpeta de logs de desarrollo
@@ -137,13 +144,35 @@ logs/                          Marcador de la carpeta de logs de desarrollo
 
 ## Configuración y logs
 
-La configuración normal está en [`config/MinimalShell.example.toml`](config/MinimalShell.example.toml) y evita atajos reservados por Windows. Para la prueba aislada sin Explorer usa [`config/MinimalShell.without-explorer.example.toml`](config/MinimalShell.without-explorer.example.toml). La aplicación puede recibir la ruta del archivo TOML como primer argumento; si no se proporciona, utiliza los valores por defecto.
+La configuración normal está en [`config/TenchyShell.example.toml`](config/TenchyShell.example.toml) y evita atajos reservados por Windows. Para la prueba aislada sin Explorer usa [`config/TenchyShell.without-explorer.example.toml`](config/TenchyShell.without-explorer.example.toml). La aplicación puede recibir la ruta del archivo TOML como primer argumento; si no se proporciona, utiliza los valores por defecto.
 
 El modo `--launch` inicia un proceso y termina inmediatamente; sirve también para diagnosticar terminal, Yazi y navegador sin registrar hotkeys.
 
+### Migración desde MinimalShell
+
+En el primer inicio, TenchyShell revisa `%LOCALAPPDATA%\MinimalShell` y copia
+únicamente archivos conocidos hacia `%LOCALAPPDATA%\TenchyShell`: perfiles TOML,
+el estado del fondo y el log heredado. La migración es idempotente, no borra el
+origen y no sobrescribe un destino diferente; cualquier conflicto queda en
+consola y en `%LOCALAPPDATA%\TenchyShell\logs\tenchyshell.log`.
+
+Durante la transición, TenchyShell adquiere los mutex de ambos nombres para
+impedir que una versión antigua y una nueva registren hotkeys simultáneamente.
+Los perfiles antiguos también pueden seguir pasándose explícitamente por ruta.
+
+## Rendimiento
+
+El protocolo, las métricas y los criterios para aceptar optimizaciones están en
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Los datos crudos se guardan en
+`%LOCALAPPDATA%\TenchyShell\benchmarks\v2\<batch-id>\` y no se versionan porque
+contienen metadatos de la máquina y de sus procesos. Antes de una captura
+oficial puede verificarse el instrumental con
+`scripts\test-performance.ps1`; los smoke tests quedan marcados como no
+oficiales y no pueden mezclarse con la comparativa final.
+
 ## Hotkeys
 
-Los valores de `[hotkeys]` en el TOML se registran al iniciar el shell. Las combinaciones repetidas se rechazan antes de entrar en modo operativo; si Windows u otra aplicación ya reservó una combinación opcional, el error queda en consola y en el log, mientras MinimalShell continúa funcionando.
+Los valores de `[hotkeys]` en el TOML se registran al iniciar el shell. Las combinaciones repetidas se rechazan antes de entrar en modo operativo; si Windows u otra aplicación ya reservó una combinación opcional, el error queda en consola y en el log, mientras TenchyShell continúa funcionando.
 
 - `Ctrl+Alt+Enter`: terminal.
 - `Ctrl+Alt+E`: terminal con Yazi.
@@ -154,7 +183,7 @@ Los valores de `[hotkeys]` en el TOML se registran al iniciar el shell. Las comb
 - `Ctrl+Alt+Shift+1..9`: mover la ventana activa al workspace 1..9.
 - `Ctrl+Win+1..9`: colocar la ventana activa en la zona de layout configurada.
 
-`Win+Q` solicita el cierre normal de la ventana activa. Las aplicaciones pueden mostrar sus propios diálogos de guardado; MinimalShell nunca termina el proceso de forma forzada.
+`Win+Q` solicita el cierre normal de la ventana activa. Las aplicaciones pueden mostrar sus propios diálogos de guardado; TenchyShell nunca termina el proceso de forma forzada.
 
 Las teclas de función `F1` a `F24` pueden usarse sin modificadores. Si F12 no está reservado en tu sesión, puedes cambiar el launcher así:
 
@@ -163,7 +192,7 @@ Las teclas de función `F1` a `F24` pueden usarse sin modificadores. Si F12 no e
 launcher = "F12"
 ```
 
-Detén cualquier instancia anterior de MinimalShell y vuelve a iniciarla con ese archivo TOML para aplicar el cambio.
+Detén cualquier instancia anterior de TenchyShell y vuelve a iniciarla con ese archivo TOML para aplicar el cambio.
 
 Los hotkeys de workspaces se configuran en `[hotkeys.workspaces]` mediante `switch_1` a `switch_9` y `move_1` a `move_9`.
 
@@ -182,19 +211,44 @@ El layout inicial se define en `[layout]` y usa dos columnas con una fila (`1x2`
 - Overlay de arrastre con `Ctrl+Shift` para seleccionar una zona visualmente.
 - Layouts independientes por monitor, coordenadas negativas y DPI por monitor.
 - Panel informativo auto-ocultable con workspace y hora local.
+- Bandeja propia Win32 con `Ctrl+Alt+T`, independiente de Explorer.
 - Cierre cooperativo de la ventana activa.
 - Recuperación mediante `explorer.exe`.
 - Acciones de sesión para cerrar sesión, apagar o reiniciar, siempre con `--confirm`.
-- Diagnóstico de dependencias y logs en `%LOCALAPPDATA%\MinimalShell\logs\`.
+- Diagnóstico de dependencias y logs en `%LOCALAPPDATA%\TenchyShell\logs\`.
 
-La aplicación no reemplaza permanentemente Winlogon, no implementa una taskbar propia y no incluye búsqueda web, plugins ni un administrador de archivos interno.
+La aplicación no reemplaza permanentemente Winlogon, no implementa una taskbar
+completa y no incluye búsqueda web, plugins ni un administrador de archivos
+interno. Su bandeja es propia y solo expone integraciones declaradas.
 
-Para validar o publicar el MVP 0.6:
+### Bandeja del sistema
+
+`Ctrl+Alt+T` abre la superficie de bandeja propia de TenchyShell. También puede abrirse haciendo clic sobre el panel izquierdo cuando está visible; el menú aparece desplegado a su derecha. No inicia, enfoca ni usa `explorer.exe`. La superficie ya tiene navegación por teclado y ciclo de vida propio; los iconos de aplicaciones de terceros requieren integración explícita porque Windows no ofrece una API pública para enumerarlos o reubicarlos automáticamente.
+
+Los elementos estáticos y dinámicos se configuran en `[system_tray]`. Un elemento dinámico ejecuta el `command` con sus `arguments` y debe devolver JSON con `text`, `tooltip`, `icon`, `state` y `action`. Consulta `scripts/mouse-battery.example.ps1` como ejemplo; el script puede reemplazarse por uno específico del fabricante del dispositivo.
+
+### Idioma de teclado
+
+El elemento `Idioma` de la bandeja muestra el método de entrada activo de la
+ventana que tenía el foco antes de abrirla. Selecciónalo con `Enter` o clic para
+ver los idiomas y distribuciones que Windows ya tiene habilitados; la opción
+activa se marca con `*`. Al elegir otro, TenchyShell solicita el cambio a esa
+ventana y actualiza el estado sin iniciar Explorer ni instalar paquetes de
+idioma.
+
+La sección opcional `[input_language]` permite deshabilitar el elemento,
+cambiar su título, usar `label_format = "short"` (`ES`, `EN`) o `"full"`, y
+definir un `hotkey` para abrir directamente el selector. Algunos IME,
+aplicaciones elevadas, UWP/WinUI o sesiones remotas pueden rechazar o aplicar el
+cambio de forma diferida; el error se registra y la configuración avanzada se
+mantiene en Windows.
+
+Para validar o publicar el MVP 0.7:
 
 ```powershell
-dotnet test MinimalShell.slnx
+dotnet test TenchyShell.slnx
 .\scripts\publish.ps1 -Configuration Release
-dotnet publish\Release\win-x64\MinimalShell.dll --check publish\Release\win-x64\MinimalShell.example.toml
+dotnet publish\TenchyShell\Release\win-x64\TenchyShell.dll --check publish\TenchyShell\Release\win-x64\TenchyShell.example.toml
 ```
 
 ## Panel informativo
@@ -225,12 +279,12 @@ Para ejecutar un comando en la terminal configurada, escribe `!` seguido del com
 !dotnet build
 ```
 
-El comando se ejecuta en una sesión persistente de PowerShell dentro de WezTerm. MinimalShell usa `wezterm-gui.exe` para los lanzamientos de escritorio, evitando una consola auxiliar de `wezterm.exe`. La ventana del launcher pide confirmación antes de abrir la terminal.
+El comando se ejecuta en una sesión persistente de PowerShell dentro de WezTerm. TenchyShell usa `wezterm-gui.exe` para los lanzamientos de escritorio, evitando una consola auxiliar de `wezterm.exe`. La ventana del launcher pide confirmación antes de abrir la terminal.
 
 Los logs de ejecución deben escribirse en:
 
 ```text
-%LOCALAPPDATA%\MinimalShell\logs\
+%LOCALAPPDATA%\TenchyShell\logs\
 ```
 
 La carpeta `logs/` del repositorio solo documenta la ubicación reservada; no debe contener logs reales ni datos de usuario.
@@ -240,7 +294,7 @@ La carpeta `logs/` del repositorio solo documenta la ubicación reservada; no de
 Ejecutar el shell desde una consola de desarrollo:
 
 ```powershell
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj
 ```
 
 La aplicación debe permanecer ejecutándose sin mostrar una ventana propia. Durante el desarrollo:
@@ -250,15 +304,15 @@ La aplicación debe permanecer ejecutándose sin mostrar una ventana propia. Dur
 
 ### Modo de prueba sin Explorer
 
-Solo en una VM o usuario secundario, MinimalShell puede detener Explorer tras haber registrado el hotkey de recuperación:
+Solo en una VM o usuario secundario, TenchyShell puede detener Explorer tras haber registrado el hotkey de recuperación:
 
 ```powershell
-dotnet run --project src/MinimalShell.App/MinimalShell.App.csproj -- --without-explorer config/MinimalShell.without-explorer.example.toml
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-explorer config/TenchyShell.without-explorer.example.toml
 ```
 
 El programa exige escribir `DETENER` en una consola interactiva antes de cerrar `explorer.exe`; después registra los hotkeys opcionales. No modifica Winlogon. Usa el hotkey configurado en `recovery` para iniciar Explorer nuevamente.
 
-La prueba sin Explorer debe hacerse únicamente en una máquina virtual o con un usuario secundario. No modificar Winlogon. Para recuperar una sesión, pulsa el hotkey de recuperación, espera que Explorer aparezca y luego cierra MinimalShell con `Ctrl+C`.
+La prueba sin Explorer debe hacerse únicamente en una máquina virtual o con un usuario secundario. No modificar Winlogon. Para recuperar una sesión, pulsa el hotkey de recuperación, espera que Explorer aparezca y luego cierra TenchyShell con `Ctrl+C`.
 
 ## Seguridad durante el desarrollo
 

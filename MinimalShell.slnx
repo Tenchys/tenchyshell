@@ -1,9 +1,0 @@
-<Solution>
-  <Project Path="src/MinimalShell.App/MinimalShell.App.csproj" />
-  <Project Path="src/MinimalShell.Core/MinimalShell.Core.csproj" />
-  <Project Path="src/MinimalShell.Win32/MinimalShell.Win32.csproj" />
-  <Project Path="src/MinimalShell.Workspaces/MinimalShell.Workspaces.csproj" />
-  <Project Path="src/MinimalShell.UI/MinimalShell.UI.csproj" />
-  <Project Path="tests/MinimalShell.Core.Tests/MinimalShell.Core.Tests.csproj" />
-  <Project Path="tests/MinimalShell.Workspaces.Tests/MinimalShell.Workspaces.Tests.csproj" />
-</Solution>

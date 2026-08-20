@@ -13,6 +13,5 @@ logs/**/*.log
 publish/
 artifacts/
 
-# Instrucciones y documentación local del entorno Codex
-AGENTS.md
+# Documentación local de planificación del entorno Codex
 mds/

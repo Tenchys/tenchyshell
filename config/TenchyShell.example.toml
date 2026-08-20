@@ -1,0 +1,178 @@
+# Configuración de ejemplo para TenchyShell.
+# Modifica los valores y reinicia TenchyShell para aplicarlos.
+
+[terminal]
+command = "wezterm-gui.exe"
+file_manager_arguments = "start --always-new-process --"
+command_shell = "powershell.exe"
+command_arguments = "start --always-new-process -- {shell} -NoExit -Command"
+
+[file_manager]
+command = "yazi.exe"
+
+[launcher]
+enabled = true
+command = ""
+
+[applications]
+browser = "brave.exe"
+
+[status_panel]
+enabled = true
+hotkey = "Ctrl+Alt+S"
+width = 220
+height = 96
+edge_zone = 4
+monitor = "primary"
+
+[window_switcher]
+enabled = true
+hotkey = "Ctrl+Alt+Tab"
+width = 680
+height = 420
+title_format = "TenchyShell — Workspace {workspace}"
+
+[system_tray]
+enabled = true
+hotkey = "Ctrl+Alt+T"
+width = 420
+height = 280
+
+[input_language]
+# Muestra y activa solamente los idiomas y distribuciones ya habilitados en Windows.
+enabled = true
+title = "Idioma"
+# "short" muestra ES/EN; "full" muestra el nombre informado por Windows.
+label_format = "short"
+# Opcional. Vacío deja el selector accesible desde la bandeja propia.
+hotkey = ""
+
+[wallpaper]
+enabled = true
+# Vacío usa la carpeta Imágenes del usuario. También admite %USERPROFILE% y rutas absolutas.
+folder = ""
+extensions = [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"]
+monitor = "all"
+
+# Los elementos definidos aquí sustituyen la lista integrada de ejemplo.
+# Un elemento sin command es estático; uno con command se actualiza mediante JSON.
+[[system_tray.items]]
+id = "terminal"
+title = "Terminal"
+text = "Abrir terminal configurado"
+tooltip = "Terminal"
+
+[[system_tray.items]]
+id = "files"
+title = "Yazi"
+text = "Abrir administrador de archivos"
+tooltip = "Yazi"
+
+[[system_tray.items]]
+id = "browser"
+title = "Navegador"
+text = "Abrir navegador configurado"
+tooltip = "Navegador"
+
+[[system_tray.items]]
+id = "network"
+title = "Red"
+text = "Consultando estado..."
+tooltip = "Estado de las interfaces de red"
+
+[[system_tray.items]]
+id = "mouse-battery"
+title = "Mouse"
+text = "Consultando..."
+tooltip = "Batería del mouse"
+default_icon = "assets/mouse.ico"
+command = "powershell.exe"
+arguments = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/mouse-battery.example.ps1"]
+interval_ms = 5000
+timeout_ms = 1500
+
+[system_tray.actions."mouse-battery".open]
+command = "powershell.exe"
+arguments = ["-NoProfile", "-Command", "Write-Host 'Configura aquí la acción del mouse' -ForegroundColor Cyan; Read-Host 'Enter para cerrar'"]
+
+[layout]
+# Habilita el layout de ventanas. El preset 1x2 significa 1 fila y 2 columnas.
+enabled = true
+max_zones = 9
+default_preset = "1x2"
+# Tamaño de los números del overlay como porcentaje del lado menor del monitor.
+# 4.0 produce una etiqueta grande y proporcional en distintas resoluciones.
+zone_number_size_percent = 4.0
+
+# Las coordenadas son relativas al área de trabajo y van de 0.0 a 1.0.
+# monitor = "*" aplica a todos los monitores sin layout específico.
+# También puedes usar monitor = "primary" o un identificador exacto como
+# monitor = '\\.\DISPLAY2' para definir un layout por monitor.
+[[layout.zones]]
+monitor = "*"
+number = 1
+left = 0.0
+top = 0.0
+right = 0.5
+bottom = 1.0
+
+[[layout.zones]]
+monitor = "*"
+number = 2
+left = 0.5
+top = 0.0
+right = 1.0
+bottom = 1.0
+
+[hotkeys]
+terminal = "Ctrl+Alt+Enter"
+files = "Ctrl+Alt+E"
+launcher = "Ctrl+Alt+Space"
+browser = "Ctrl+Alt+B"
+close_window = "Ctrl+Alt+Q"
+recovery = "Ctrl+Alt+Shift+E"
+
+[hotkeys.workspaces]
+switch_1 = "Ctrl+Alt+1"
+switch_2 = "Ctrl+Alt+2"
+switch_3 = "Ctrl+Alt+3"
+switch_4 = "Ctrl+Alt+4"
+switch_5 = "Ctrl+Alt+5"
+switch_6 = "Ctrl+Alt+6"
+switch_7 = "Ctrl+Alt+7"
+switch_8 = "Ctrl+Alt+8"
+switch_9 = "Ctrl+Alt+9"
+move_1 = "Ctrl+Alt+Shift+1"
+move_2 = "Ctrl+Alt+Shift+2"
+move_3 = "Ctrl+Alt+Shift+3"
+move_4 = "Ctrl+Alt+Shift+4"
+move_5 = "Ctrl+Alt+Shift+5"
+move_6 = "Ctrl+Alt+Shift+6"
+move_7 = "Ctrl+Alt+Shift+7"
+move_8 = "Ctrl+Alt+Shift+8"
+move_9 = "Ctrl+Alt+Shift+9"
+
+[hotkeys.window]
+move_left = "Ctrl+Alt+Left"
+move_right = "Ctrl+Alt+Right"
+move_up = "Ctrl+Alt+Up"
+move_down = "Ctrl+Alt+Down"
+resize_grow = "Ctrl+Alt+Shift+Right"
+resize_shrink = "Ctrl+Alt+Shift+Left"
+maximize = "Ctrl+Alt+M"
+restore = "Ctrl+Alt+R"
+focus = "Ctrl+Alt+F"
+
+[hotkeys.layout]
+# Cada hotkey coloca la ventana activa en la zona con el mismo número.
+zone_1 = "Ctrl+Win+1"
+zone_2 = "Ctrl+Win+2"
+zone_3 = "Ctrl+Win+3"
+zone_4 = "Ctrl+Win+4"
+zone_5 = "Ctrl+Win+5"
+zone_6 = "Ctrl+Win+6"
+zone_7 = "Ctrl+Win+7"
+zone_8 = "Ctrl+Win+8"
+zone_9 = "Ctrl+Win+9"
+# Modificadores usados durante el arrastre para mostrar el overlay.
+drag_modifier = "Ctrl+Shift"
