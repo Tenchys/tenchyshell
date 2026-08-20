@@ -295,7 +295,14 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
             $_.SessionId -eq $benchmarkSessionId -and
                 $voluntaryProcessNames -contains $_.ProcessName.ToLowerInvariant()
         })
-        if ($voluntary.Count -gt 0) { throw "Cierra aplicaciones voluntarias antes de medir: $($voluntary.ProcessName -join ', ')." }
+        if ($voluntary.Count -gt 0) {
+            $voluntaryNames = @($voluntary.ProcessName | Sort-Object -Unique) -join ', '
+            if ($SmokeTest) {
+                Write-Warning "El smoke test continuará con aplicaciones voluntarias abiertas: $voluntaryNames."
+            } else {
+                throw "Cierra aplicaciones voluntarias antes de medir: $voluntaryNames."
+            }
+        }
         if (@(Get-TenchyShellProcesses).Count -gt 0) { throw "Ya existe una instancia de TenchyShell." }
         if (@(Get-ExplorerProcesses).Count -eq 0) { Ensure-ExplorerRecovery }
         Wait-ExplorerStable 20
