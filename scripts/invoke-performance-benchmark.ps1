@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$BatchId = "",
 
@@ -23,6 +23,7 @@ $withoutExplorerConfiguration = Join-Path $publishDirectory "TenchyShell.without
 $releaseManifestPath = Join-Path $publishDirectory "benchmark-release.json"
 $benchmarkRoot = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v2"
 $logPath = Join-Path $env:LOCALAPPDATA "TenchyShell\logs\tenchyshell.log"
+$benchmarkSessionId = (Get-Process -Id $PID).SessionId
 $toolNames = @("wezterm", "wezterm-gui", "yazi")
 $voluntaryProcessNames = @("brave", "chrome", "firefox", "msedge", "opera", "dropbox", "onedrive")
 $matrix = @(
@@ -77,8 +78,17 @@ public static class TenchyShellPerformanceOrchestratorInput
 
 function Get-ToolProcesses {
     return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $toolNames -contains $_.ProcessName.ToLowerInvariant()
+        $_.SessionId -eq $benchmarkSessionId -and
+            $toolNames -contains $_.ProcessName.ToLowerInvariant()
     })
+}
+
+function Get-ExplorerProcesses {
+    return @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $benchmarkSessionId)
+}
+
+function Get-TenchyShellProcesses {
+    return @(Get-Process -Name TenchyShell -ErrorAction SilentlyContinue | Where-Object SessionId -eq $benchmarkSessionId)
 }
 
 function Wait-Condition([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$FailureMessage) {
@@ -88,6 +98,37 @@ function Wait-Condition([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     throw $FailureMessage
+}
+
+function Wait-ExplorerStable([int]$TimeoutSeconds = 20) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $stableSince = $null
+    do {
+        $count = @(Get-ExplorerProcesses).Count
+        if ($count -eq 1) {
+            if ($null -eq $stableSince) { $stableSince = [DateTime]::UtcNow }
+            elseif (([DateTime]::UtcNow - $stableSince).TotalSeconds -ge 2) { return }
+        } else {
+            $stableSince = $null
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Explorer no quedó estable como proceso único dentro del plazo."
+}
+
+function Wait-TenchyShellReady([Diagnostics.Process]$Process, [int]$TimeoutSeconds = 35) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if ($Process.HasExited) {
+            throw "TenchyShell terminó antes de alcanzar el estado sin Explorer (código $($Process.ExitCode))."
+        }
+        if (@(Get-TenchyShellProcesses).Count -eq 1 -and
+            @(Get-ExplorerProcesses).Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "TenchyShell no alcanzó el estado estable sin Explorer."
 }
 
 function Get-NextOfficialCapture {
@@ -224,10 +265,11 @@ function Set-CaptureOrchestration([string]$Path, $Manifest, [bool]$IdleManaged, 
 }
 
 function Ensure-ExplorerRecovery {
-    if (@(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count -eq 0) {
+    if (@(Get-ExplorerProcesses).Count -eq 0) {
         Start-Process -FilePath "explorer.exe" | Out-Null
-        Wait-Condition { @(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count -ge 1 } 10 "No se pudo restaurar explorer.exe. Usa Ctrl+Alt+Supr para recuperación."
     }
+    try { Wait-ExplorerStable 20 }
+    catch { throw "No se pudo restaurar explorer.exe de forma estable. Usa Ctrl+Alt+Supr para recuperación. $($_.Exception.Message)" }
 }
 
 function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
@@ -239,7 +281,7 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
     $idleManaged = $false
     $newCapturePath = $null
     $errors = [Collections.Generic.List[string]]::new()
-    $logOffset = if (Test-Path -LiteralPath $logPath -PathType Leaf) { (Get-Content -LiteralPath $logPath -Raw).Length } else { 0 }
+    $logOffset = if (Test-Path -LiteralPath $logPath -PathType Leaf) { (Get-Content -LiteralPath $logPath -Raw -Encoding UTF8).Length } else { 0 }
     $outputDirectory = if ($SmokeTest) { $benchmarkRoot } else { Join-Path $benchmarkRoot $BatchId }
     if (-not (Test-Path -LiteralPath $outputDirectory -PathType Container)) {
         New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
@@ -249,10 +291,14 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
     try {
         $tools = Get-ToolProcesses
         if ($tools.Count -gt 0) { throw "La captura debe comenzar sin WezTerm/Yazi; encontrados: $($tools.ProcessName -join ', ')." }
-        $voluntary = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $voluntaryProcessNames -contains $_.ProcessName.ToLowerInvariant() })
+        $voluntary = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.SessionId -eq $benchmarkSessionId -and
+                $voluntaryProcessNames -contains $_.ProcessName.ToLowerInvariant()
+        })
         if ($voluntary.Count -gt 0) { throw "Cierra aplicaciones voluntarias antes de medir: $($voluntary.ProcessName -join ', ')." }
-        if (@(Get-Process -Name TenchyShell -ErrorAction SilentlyContinue).Count -gt 0) { throw "Ya existe una instancia de TenchyShell." }
-        if (@(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count -ne 1) { throw "Se requiere exactamente un explorer.exe al comenzar la captura automatizada." }
+        if (@(Get-TenchyShellProcesses).Count -gt 0) { throw "Ya existe una instancia de TenchyShell." }
+        if (@(Get-ExplorerProcesses).Count -eq 0) { Ensure-ExplorerRecovery }
+        Wait-ExplorerStable 20
 
         & $shellExecutable --check $normalConfiguration
         if ($LASTEXITCODE -ne 0) { throw "La publicación no superó --check." }
@@ -265,11 +311,7 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
                 $withoutExplorerConfiguration
             )
             $shellProcess = Start-Process -FilePath $shellExecutable -ArgumentList $shellArguments -WindowStyle Hidden -PassThru
-            Wait-Condition {
-                -not $shellProcess.HasExited -and
-                    @(Get-Process -Name TenchyShell -ErrorAction SilentlyContinue).Count -eq 1 -and
-                    @(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count -eq 0
-            } 20 "TenchyShell no alcanzó el estado estable sin Explorer."
+            Wait-TenchyShellReady $shellProcess 35
         }
 
         if ($Phase -eq "Idle") {
@@ -317,10 +359,10 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
             } elseif ($shellProcess.ExitCode -ne 0) {
                 $errors.Add("TenchyShell terminó con código $($shellProcess.ExitCode).")
             }
-            try { Wait-Condition { @(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count -eq 1 } 10 "Explorer no fue restaurado automáticamente." }
+            try { Wait-ExplorerStable 20 }
             catch { $errors.Add($_.Exception.Message) }
             if (Test-Path -LiteralPath $logPath -PathType Leaf) {
-                $log = Get-Content -LiteralPath $logPath -Raw
+                $log = Get-Content -LiteralPath $logPath -Raw -Encoding UTF8
                 $newLog = if ($logOffset -le $log.Length) { $log.Substring([int]$logOffset) } else { "" }
                 if ($newLog.IndexOf("TenchyShell finalizado; se liberaron hotkeys y recursos Win32.", [StringComparison]::Ordinal) -lt 0) {
                     $errors.Add("El log no confirmó la liberación limpia de hotkeys y recursos Win32.")
@@ -342,7 +384,7 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
         if ($null -ne $shellProcess -and -not $shellProcess.HasExited) {
             try {
                 Stop-Process -Id $shellProcess.Id -Force -ErrorAction Stop
-                $shellProcess.WaitForExit(5000)
+                [void]$shellProcess.WaitForExit(5000)
                 $errors.Add("Se forzó el cierre del proceso TenchyShell propio durante la recuperación.")
             } catch {
                 $errors.Add("No se pudo cerrar el proceso TenchyShell propio durante la recuperación: $($_.Exception.Message)")

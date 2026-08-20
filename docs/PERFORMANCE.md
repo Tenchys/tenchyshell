@@ -57,6 +57,11 @@ Cada proceso incluido tiene un rol explícito:
 - `Tool`: WezTerm, Yazi y descendientes de estas herramientas.
 - `Total`: suma de `Shell` y `Tool`.
 
+El recolector limita shells, herramientas y procesos externos al `SessionId`
+interactivo donde se ejecuta. Una sesión de otro usuario nunca se cierra ni se
+atribuye a la captura; aun así, para reducir carga global se debe cerrar la
+sesión principal antes de entrar al usuario secundario.
+
 No se atribuyen a Explorer sus hosts auxiliares ni descendientes arbitrarios.
 Los navegadores se excluyen de los roles. Procesos externos se conservan como
 contexto; una aplicación no prevista que supere el 5 % de CPU durante diez
@@ -168,7 +173,9 @@ El modo interno `--automated-benchmark` solo es válido junto con
 `--without-explorer` y `--exit-after-seconds`; TenchyShell restaura Explorer en
 su bloque `finally`. El orquestador también mantiene una recuperación externa
 y marca la captura inválida si necesita forzar el cierre de su propio proceso.
-El log debe confirmar que se liberaron hotkeys y recursos.
+El cierre de Explorer se verifica dentro de la sesión actual y contempla de
+forma acotada un relanzamiento automático de Windows. El log debe confirmar
+que se liberaron hotkeys y recursos.
 
 El informe también puede regenerarse explícitamente:
 

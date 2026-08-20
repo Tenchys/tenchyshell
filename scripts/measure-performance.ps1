@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidateSet("TenchyShell", "Explorer")]
@@ -58,6 +58,7 @@ $ErrorActionPreference = "Stop"
 $schemaVersion = 2
 $logicalProcessorCount = [Environment]::ProcessorCount
 $collectorProcessId = $PID
+$collectorSessionId = (Get-Process -Id $PID).SessionId
 $browserNames = @("brave", "chrome", "firefox", "msedge", "opera")
 $toolNames = @("wezterm", "wezterm-gui", "yazi")
 $wezTermNames = @("wezterm", "wezterm-gui")
@@ -427,7 +428,8 @@ function Get-Totals($Rows) {
 
 function Get-ToolRootProcesses {
     return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $toolNames -contains (Get-NormalizedProcessName $_.ProcessName)
+        $_.SessionId -eq $collectorSessionId -and
+            $toolNames -contains (Get-NormalizedProcessName $_.ProcessName)
     })
 }
 
@@ -438,7 +440,7 @@ function Get-Sample(
     [hashtable]$ExternalStreaks,
     [datetime]$PreviousTimestamp) {
     $timestamp = Get-Date
-    $cimProcesses = @(Get-CimInstance Win32_Process)
+    $cimProcesses = @(Get-CimInstance Win32_Process | Where-Object { [int]$_.SessionId -eq $collectorSessionId })
     $roles = Get-RoleMap $cimProcesses
     $shellRoots = @($cimProcesses | Where-Object { $scenarioNames -contains (Get-NormalizedProcessName $_.Name) })
     $elapsedMilliseconds = [Math]::Max(1, ($timestamp - $PreviousTimestamp).TotalMilliseconds)
@@ -545,7 +547,7 @@ if (-not (Test-Path -LiteralPath $captureOutputDirectory -PathType Container)) {
     New-Item -ItemType Directory -Path $captureOutputDirectory -Force | Out-Null
 }
 
-$preflightCim = @(Get-CimInstance Win32_Process)
+$preflightCim = @(Get-CimInstance Win32_Process | Where-Object { [int]$_.SessionId -eq $collectorSessionId })
 $preflightShellCount = @($preflightCim | Where-Object { $scenarioNames -contains (Get-NormalizedProcessName $_.Name) }).Count
 if ($preflightShellCount -ne 1) {
     throw "Se requiere exactamente una shell de $Scenario; se encontraron $preflightShellCount."
@@ -775,6 +777,7 @@ $result = [ordered]@{
         browserNames = $browserNames
         contaminationExclusions = $contaminationExclusions
         allowedExistingToolsForSmoke = [bool]$AllowExistingToolsForSmoke
+        sessionId = $collectorSessionId
     }
     runs = @($runs)
 }

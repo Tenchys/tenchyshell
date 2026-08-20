@@ -164,8 +164,23 @@ internal static class Program
 
     private static void EnsureExplorerRunning(ILogger logger)
     {
-        var current = Process.GetProcessesByName("explorer");
-        if (current.Length > 0)
+        using var ownProcess = Process.GetCurrentProcess();
+        var sessionId = ownProcess.SessionId;
+        var allExplorers = Process.GetProcessesByName("explorer");
+        var current = new List<Process>();
+        foreach (var process in allExplorers)
+        {
+            try
+            {
+                if (process.SessionId == sessionId) current.Add(process);
+                else process.Dispose();
+            }
+            catch
+            {
+                process.Dispose();
+            }
+        }
+        if (current.Count > 0)
         {
             foreach (var process in current) process.Dispose();
             logger.Info("Recuperación automática del benchmark: explorer.exe ya estaba activo.");
