@@ -8,9 +8,10 @@ public sealed class ExplorerShellControllerTests
     private static readonly TimeSpan Millisecond = TimeSpan.FromMilliseconds(1);
 
     [Fact]
-    public void TryExitCurrentSessionAcceptsAStableCooperativeExit()
+    public void TryExitCurrentSessionAcceptsAStableShellExitWithResidualExplorerProcess()
     {
-        var platform = new FakePlatform([42], [42], [], []);
+        var platform = new FakePlatform([42]);
+        platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, IntPtr.Zero);
         var controller = new ExplorerShellController(platform);
 
         var result = controller.TryExitCurrentSession(
@@ -20,13 +21,15 @@ public sealed class ExplorerShellControllerTests
 
         Assert.True(result.Succeeded);
         Assert.Equal(42, result.ProcessId);
+        Assert.Contains("proceso residual", result.Message, StringComparison.Ordinal);
         Assert.Equal(1, platform.PostCount);
     }
 
     [Fact]
     public void TryExitCurrentSessionRejectsRelaunchedExplorer()
     {
-        var platform = new FakePlatform([42], [], [99]);
+        var platform = new FakePlatform([42], [99]);
+        platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, new IntPtr(5678));
         var controller = new ExplorerShellController(platform);
 
         var result = controller.TryExitCurrentSession(
@@ -120,7 +123,7 @@ public sealed class ExplorerShellControllerTests
             Millisecond);
 
         Assert.False(result.Succeeded);
-        Assert.Contains("no terminó", result.Message, StringComparison.Ordinal);
+        Assert.Contains("Shell_TrayWnd", result.Message, StringComparison.Ordinal);
         Assert.Equal(2, platform.DelayCount);
     }
 
@@ -137,6 +140,11 @@ public sealed class ExplorerShellControllerTests
         public int PostCount { get; private set; }
         public int DelayCount { get; private set; }
 
+        public void SetTrayWindows(params IntPtr[] samples)
+        {
+            foreach (var sample in samples) traySamples.Enqueue(sample);
+        }
+
         public IReadOnlyList<int> GetExplorerProcessIds(int sessionId)
         {
             Assert.Equal(8, sessionId);
@@ -144,7 +152,13 @@ public sealed class ExplorerShellControllerTests
             return lastSample;
         }
 
-        public IntPtr FindShellTrayWindow() => TrayWindow;
+        private readonly Queue<IntPtr> traySamples = new();
+
+        public IntPtr FindShellTrayWindow()
+        {
+            if (traySamples.Count > 0) TrayWindow = traySamples.Dequeue();
+            return TrayWindow;
+        }
 
         public int GetWindowProcessId(IntPtr window)
         {

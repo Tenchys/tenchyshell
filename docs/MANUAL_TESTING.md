@@ -99,7 +99,7 @@ Solo en una VM o usuario secundario:
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-explorer config/TenchyShell.without-explorer.example.toml
 ```
 
-- [ ] Escribir `DETENER` y confirmar que Explorer se cierra tras registrar el hotkey de recuperación.
+- [ ] Escribir `DETENER` y confirmar que `Shell_TrayWnd` desaparece tras registrar el hotkey de recuperación. `explorer.exe` puede permanecer como proceso residual sin bandeja; no se termina a la fuerza.
 - [ ] Confirmar que el modo no cambia Winlogon ni mata automáticamente una nueva instancia de Explorer iniciada por Windows; la recuperación sigue siendo manual mediante el hotkey.
 - [ ] Probar launcher, terminal, Yazi, navegador y cierre de ventana.
 - [ ] Pulsar `Ctrl+Alt+Shift+E` y comprobar que Explorer vuelve a iniciarse.

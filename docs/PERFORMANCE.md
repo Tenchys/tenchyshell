@@ -175,9 +175,11 @@ su bloque `finally`. El orquestador también mantiene una recuperación externa
 y marca la captura inválida si necesita forzar el cierre de su propio proceso.
 TenchyShell identifica `Shell_TrayWnd`, comprueba que pertenece al único
 `explorer.exe` de la sesión y solicita la misma salida cooperativa que ofrece la
-barra de tareas. No termina Explorer a la fuerza: exige que permanezca ausente
-durante dos segundos y cancela la captura si Windows lo relanza, si el HWND no
-coincide o si el mensaje deja de ser compatible con una versión futura. Este
+barra de tareas. No termina Explorer a la fuerza: exige que la superficie de
+shell permanezca ausente durante dos segundos. `explorer.exe` puede permanecer
+como proceso residual sin bandeja; la captura se cancela si Windows vuelve a
+crear `Shell_TrayWnd`, si el HWND no coincide o si el mensaje deja de ser
+compatible con una versión futura. Este
 mensaje de la shell no es un contrato público de Win32, por lo que dicha
 validación y la recuperación posterior son requisitos del instrumental. El log
 debe confirmar que se liberaron hotkeys y recursos.

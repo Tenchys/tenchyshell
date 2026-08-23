@@ -52,6 +52,9 @@ using System.Threading;
 
 public static class TenchyShellPerformanceOrchestratorInput
 {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindow(string className, string windowName);
+
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
 
@@ -72,6 +75,11 @@ public static class TenchyShellPerformanceOrchestratorInput
         keybd_event(Q, 0, KeyUp, UIntPtr.Zero);
         return true;
     }
+
+    public static bool HasShellTray()
+    {
+        return FindWindow("Shell_TrayWnd", null) != IntPtr.Zero;
+    }
 }
 '@
 }
@@ -91,6 +99,10 @@ function Get-TenchyShellProcesses {
     return @(Get-Process -Name TenchyShell -ErrorAction SilentlyContinue | Where-Object SessionId -eq $benchmarkSessionId)
 }
 
+function Test-ShellTrayPresent {
+    return [TenchyShellPerformanceOrchestratorInput]::HasShellTray()
+}
+
 function Wait-Condition([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$FailureMessage) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
@@ -105,7 +117,7 @@ function Wait-ExplorerStable([int]$TimeoutSeconds = 20) {
     $stableSince = $null
     do {
         $count = @(Get-ExplorerProcesses).Count
-        if ($count -eq 1) {
+        if ($count -eq 1 -and (Test-ShellTrayPresent)) {
             if ($null -eq $stableSince) { $stableSince = [DateTime]::UtcNow }
             elseif (([DateTime]::UtcNow - $stableSince).TotalSeconds -ge 2) { return }
         } else {
@@ -123,7 +135,7 @@ function Wait-TenchyShellReady([Diagnostics.Process]$Process, [int]$TimeoutSecon
             throw "TenchyShell terminó antes de alcanzar el estado sin Explorer (código $($Process.ExitCode))."
         }
         if (@(Get-TenchyShellProcesses).Count -eq 1 -and
-            @(Get-ExplorerProcesses).Count -eq 0) {
+            -not (Test-ShellTrayPresent)) {
             return
         }
         Start-Sleep -Milliseconds 100
@@ -265,7 +277,7 @@ function Set-CaptureOrchestration([string]$Path, $Manifest, [bool]$IdleManaged, 
 }
 
 function Ensure-ExplorerRecovery {
-    if (@(Get-ExplorerProcesses).Count -eq 0) {
+    if (-not (Test-ShellTrayPresent)) {
         Start-Process -FilePath "explorer.exe" | Out-Null
     }
     try { Wait-ExplorerStable 20 }
@@ -304,7 +316,7 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
             }
         }
         if (@(Get-TenchyShellProcesses).Count -gt 0) { throw "Ya existe una instancia de TenchyShell." }
-        if (@(Get-ExplorerProcesses).Count -eq 0) { Ensure-ExplorerRecovery }
+        if (-not (Test-ShellTrayPresent)) { Ensure-ExplorerRecovery }
         Wait-ExplorerStable 20
 
         & $shellExecutable --check $normalConfiguration

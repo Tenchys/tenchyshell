@@ -77,27 +77,32 @@ public sealed class ExplorerShellController
 
         var requiredStableSamples = Math.Max(1, (int)Math.Ceiling(stablePeriod / pollInterval));
         var maximumSamples = Math.Max(requiredStableSamples, (int)Math.Ceiling(timeout / pollInterval));
-        var absentSamples = 0;
+        var absentTraySamples = 0;
 
         for (var sample = 0; sample < maximumSamples; sample++)
         {
             platform.Delay(pollInterval);
-            var currentProcesses = platform.GetExplorerProcessIds(sessionId);
-            if (currentProcesses.Count == 0)
+            var currentTrayWindow = platform.FindShellTrayWindow();
+            if (currentTrayWindow == IntPtr.Zero)
             {
-                absentSamples++;
-                if (absentSamples >= requiredStableSamples)
+                absentTraySamples++;
+                if (absentTraySamples >= requiredStableSamples)
                 {
+                    var remainingProcesses = platform.GetExplorerProcessIds(sessionId);
+                    var residualProcessMessage = remainingProcesses.Contains(initialProcessId)
+                        ? $" explorer.exe (PID {initialProcessId}) permanece como proceso residual sin bandeja."
+                        : string.Empty;
                     return new ExplorerShellExitResult(
                         true,
-                        $"Explorer terminó de forma cooperativa y permaneció ausente durante {stablePeriod.TotalSeconds:0.#} s.",
+                        $"Explorer dejó de actuar como shell y Shell_TrayWnd permaneció ausente durante {stablePeriod.TotalSeconds:0.#} s.{residualProcessMessage}",
                         initialProcessId);
                 }
 
                 continue;
             }
 
-            absentSamples = 0;
+            absentTraySamples = 0;
+            var currentProcesses = platform.GetExplorerProcessIds(sessionId);
             if (currentProcesses.Count != 1)
             {
                 return new ExplorerShellExitResult(
@@ -113,11 +118,20 @@ public sealed class ExplorerShellController
                     $"Windows relanzó explorer.exe con PID {currentProcesses[0]}; se canceló el modo sin Explorer.",
                     initialProcessId);
             }
+
+            var currentTrayProcessId = platform.GetWindowProcessId(currentTrayWindow);
+            if (currentTrayProcessId != initialProcessId)
+            {
+                return new ExplorerShellExitResult(
+                    false,
+                    $"Shell_TrayWnd cambió al PID {currentTrayProcessId}; se canceló el modo sin Explorer.",
+                    initialProcessId);
+            }
         }
 
         return new ExplorerShellExitResult(
             false,
-            $"explorer.exe (PID {initialProcessId}) no terminó de forma estable dentro de {timeout.TotalSeconds:0.#} s.",
+            $"Shell_TrayWnd de explorer.exe (PID {initialProcessId}) no desapareció de forma estable dentro de {timeout.TotalSeconds:0.#} s.",
             initialProcessId);
     }
 }

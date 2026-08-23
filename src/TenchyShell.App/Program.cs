@@ -105,7 +105,7 @@ internal static class Program
 
         if (withoutExplorer && !automatedBenchmark && !ConfirmExplorerShutdown())
         {
-            Console.Error.WriteLine("Inicio cancelado: explorer.exe no fue cerrado.");
+            Console.Error.WriteLine("Inicio cancelado: Explorer no dejó de actuar como shell.");
             return 1;
         }
 
@@ -157,7 +157,7 @@ internal static class Program
             return false;
         }
 
-        Console.WriteLine("ADVERTENCIA: se cerrará explorer.exe después de registrar los hotkeys.");
+        Console.WriteLine("ADVERTENCIA: se solicitará que Explorer deje de actuar como shell después de registrar los hotkeys.");
         Console.WriteLine("Usa una VM o un usuario secundario. Escribe DETENER para continuar:");
         return string.Equals(Console.ReadLine()?.Trim(), "DETENER", StringComparison.OrdinalIgnoreCase);
     }
