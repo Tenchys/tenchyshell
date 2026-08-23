@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+         xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+         xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap3 uap5 desktop4 rescap">
+  <!-- La identidad y el publicador deben sustituirse por los del certificado de release. -->
+  <Identity Name="TenchyShell.NotificationBridge"
+            Publisher="CN=TenchyShell Development"
+            Version="0.7.10.4"
+            ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>TenchyShell Notification Bridge</DisplayName>
+    <PublisherDisplayName>TenchyShell</PublisherDisplayName>
+    <Description>Bridge opcional de notificaciones para TenchyShell.</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Resources>
+    <Resource Language="es-cl" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Applications>
+    <Application Id="Bridge"
+                 Executable="TenchyShell.NotificationBridge.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+          DisplayName="TenchyShell Notification Bridge"
+          Description="Bridge opcional de notificaciones para TenchyShell."
+          BackgroundColor="transparent"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png"
+          AppListEntry="none" />
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias" EntryPoint="Windows.FullTrustApplication">
+          <uap5:AppExecutionAlias desktop4:Subsystem="windows">
+            <uap5:ExecutionAlias Alias="TenchyShellNotificationBridge.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <uap3:Capability Name="userNotificationListener" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

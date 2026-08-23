@@ -8,7 +8,40 @@ public sealed class ExplorerShellControllerTests
     private static readonly TimeSpan Millisecond = TimeSpan.FromMilliseconds(1);
 
     [Fact]
-    public void TryExitCurrentSessionAcceptsAStableShellExitWithResidualExplorerProcess()
+    public void WorkspaceTrackingAcceptsAnAltTabRepresentativeWithAnOwner()
+    {
+        var window = CreateWorkspaceWindow(owner: (IntPtr)20, rootOwner: (IntPtr)20, altTabRepresentative: (IntPtr)10);
+
+        var decision = WorkspaceWindowService.DecideWindowTracking(window, currentProcessId: 1);
+
+        Assert.True(decision.Include);
+        Assert.Equal("alt_tab_representative", decision.Reason);
+    }
+
+    [Fact]
+    public void WorkspaceTrackingExcludesAnOwnedPopupWhenAnotherWindowRepresentsItInAltTab()
+    {
+        var window = CreateWorkspaceWindow(owner: (IntPtr)20, rootOwner: (IntPtr)20, altTabRepresentative: (IntPtr)20);
+
+        var decision = WorkspaceWindowService.DecideWindowTracking(window, currentProcessId: 1);
+
+        Assert.False(decision.Include);
+        Assert.Equal("owned_or_popup_window", decision.Reason);
+    }
+
+    [Fact]
+    public void WorkspaceTrackingExcludesToolWindowsBeforeApplyingAltTabRules()
+    {
+        var window = CreateWorkspaceWindow(extendedStyle: NativeMethods.WS_EX_TOOLWINDOW);
+
+        var decision = WorkspaceWindowService.DecideWindowTracking(window, currentProcessId: 1);
+
+        Assert.False(decision.Include);
+        Assert.Equal("tool_window", decision.Reason);
+    }
+
+    [Fact]
+    public void TryExitCurrentSessionRejectsAStableShellExitWithResidualExplorerProcess()
     {
         var platform = new FakePlatform([42]);
         platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, IntPtr.Zero);
@@ -19,11 +52,28 @@ public sealed class ExplorerShellControllerTests
             TimeSpan.FromMilliseconds(2),
             Millisecond);
 
-        Assert.True(result.Succeeded);
+        Assert.False(result.Succeeded);
         Assert.Equal(42, result.ProcessId);
+        Assert.Equal(ExplorerShellState.ResidualProcess, result.State);
         Assert.Contains("proceso residual", result.Message, StringComparison.Ordinal);
         Assert.Equal(1, platform.PostCount);
     }
+
+    private static WorkspaceWindowSnapshot CreateWorkspaceWindow(
+        IntPtr? owner = null,
+        IntPtr? rootOwner = null,
+        IntPtr? altTabRepresentative = null,
+        long extendedStyle = 0) => new(
+            Handle: (IntPtr)10,
+            IsVisible: true,
+            ProcessId: 2,
+            Title: "Administrador de tareas",
+            ClassName: "TaskManagerWindow",
+            Owner: owner ?? IntPtr.Zero,
+            RootOwner: rootOwner ?? (IntPtr)10,
+            AltTabRepresentative: altTabRepresentative ?? (IntPtr)10,
+            ExtendedStyle: extendedStyle,
+            IsCloaked: false);
 
     [Fact]
     public void TryExitCurrentSessionRejectsRelaunchedExplorer()
@@ -58,17 +108,31 @@ public sealed class ExplorerShellControllerTests
     }
 
     [Fact]
-    public void TryExitCurrentSessionAcceptsAnAlreadyAbsentShellTray()
+    public void TryExitCurrentSessionAcceptsAnAlreadyStoppedExplorer()
     {
-        var platform = new FakePlatform([42]) { TrayWindow = IntPtr.Zero };
+        var platform = new FakePlatform([]) { TrayWindow = IntPtr.Zero };
         var controller = new ExplorerShellController(platform);
 
         var result = controller.TryExitCurrentSession(Millisecond, Millisecond, Millisecond);
 
         Assert.True(result.Succeeded);
-        Assert.Equal(42, result.ProcessId);
+        Assert.Null(result.ProcessId);
+        Assert.Equal(ExplorerShellState.Stopped, result.State);
         Assert.Contains("ya estaba ausente", result.Message, StringComparison.Ordinal);
         Assert.Equal(0, platform.PostCount);
+    }
+
+    [Fact]
+    public void CurrentSessionStateDoesNotAllowRecoveryWhenExplorerIsResidual()
+    {
+        var platform = new FakePlatform([42]) { TrayWindow = IntPtr.Zero };
+        var controller = new ExplorerShellController(platform);
+
+        var result = controller.GetCurrentSessionState();
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(ExplorerShellState.ResidualProcess, result.State);
+        Assert.Equal(42, result.ProcessId);
     }
 
     [Fact]

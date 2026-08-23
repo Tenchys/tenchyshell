@@ -24,10 +24,13 @@ internal static class NativeMethods
     internal const uint WM_LBUTTONDOWN = 0x0201;
     internal const uint WM_LBUTTONUP = 0x0202;
     internal const uint WM_MOUSEMOVE = 0x0200;
+    internal const uint WM_MOUSELEAVE = 0x02A3;
     internal const uint WM_KEYUP = 0x0101;
     internal const uint WM_SYSKEYDOWN = 0x0104;
     internal const uint WM_SYSKEYUP = 0x0105;
     internal const uint WM_USER = 0x0400;
+    internal const uint MB_OK = 0x00000000;
+    internal const uint MB_ICONWARNING = 0x00000030;
 
     internal const uint MOD_ALT = 0x0001;
     internal const uint MOD_CONTROL = 0x0002;
@@ -44,6 +47,8 @@ internal static class NativeMethods
     internal const int VK_DOWN = 0x28;
     internal const int VK_TAB = 0x09;
     internal const int VK_MENU = 0x12;
+    internal const int VK_LMENU = 0xA4;
+    internal const int VK_RMENU = 0xA5;
     internal const int VK_PRIOR = 0x21;
     internal const int VK_NEXT = 0x22;
     internal const int VK_END = 0x23;
@@ -84,6 +89,7 @@ internal static class NativeMethods
     internal const int WH_MOUSE_LL = 14;
     internal const uint MONITORINFOF_PRIMARY = 0x00000001;
     internal const uint GA_ROOT = 2;
+    internal const uint GA_ROOTOWNER = 3;
     internal static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
     internal const uint DEFAULT_CHARSET = 1;
     internal const uint OUT_DEFAULT_PRECIS = 0;
@@ -93,10 +99,14 @@ internal static class NativeMethods
     internal const uint FF_DONTCARE = 0;
     internal const uint DT_CENTER = 0x00000001;
     internal const uint DT_VCENTER = 0x00000004;
+    internal const uint DT_WORDBREAK = 0x00000010;
     internal const uint DT_SINGLELINE = 0x00000020;
+    internal const uint DT_CALCRECT = 0x00000400;
+    internal const int DEFAULT_GUI_FONT = 17;
     internal const uint IMAGE_ICON = 1;
     internal const uint LR_LOADFROMFILE = 0x00000010;
     internal const uint DI_NORMAL = 0x0003;
+    internal const uint TME_LEAVE = 0x00000002;
 
     internal static readonly IntPtr HWND_TOPMOST = new(-1);
     internal static readonly IntPtr HWND_BOTTOM = new(1);
@@ -175,6 +185,15 @@ internal static class NativeMethods
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct TrackMouseEventData
+    {
+        internal uint Size;
+        internal uint Flags;
+        internal IntPtr WindowHandle;
+        internal uint HoverTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct MonitorInfo
     {
         internal uint Size;
@@ -236,6 +255,22 @@ internal static class NativeMethods
         internal int BatteryFullLifeTime;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GdiplusStartupInput
+    {
+        internal uint Version;
+        internal IntPtr DebugEventCallback;
+        [MarshalAs(UnmanagedType.Bool)] internal bool SuppressBackgroundThread;
+        [MarshalAs(UnmanagedType.Bool)] internal bool SuppressExternalCodecs;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GdiplusStartupOutput
+    {
+        internal IntPtr NotificationHook;
+        internal IntPtr NotificationUnhook;
+    }
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern ushort RegisterClassEx(ref WindowClass windowClass);
 
@@ -291,12 +326,26 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     internal static extern IntPtr DefWindowProc(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern int MessageBox(IntPtr hWnd, string text, string caption, uint type);
+
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr SetFocus(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool attach);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("kernel32.dll")]
+    internal static extern uint GetCurrentThreadId();
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -357,6 +406,10 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetCursorPos(out Point point);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool TrackMouseEvent(ref TrackMouseEventData eventData);
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr MonitorFromPoint(Point point, uint flags);
@@ -430,8 +483,35 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool DeleteObject(IntPtr objectHandle);
 
+    [DllImport("gdiplus.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GdiplusStartup(
+        out nuint token,
+        ref GdiplusStartupInput input,
+        out GdiplusStartupOutput output);
+
+    [DllImport("gdiplus.dll")]
+    internal static extern void GdiplusShutdown(nuint token);
+
+    [DllImport("gdiplus.dll", CharSet = CharSet.Unicode)]
+    internal static extern int GdipLoadImageFromFile(string filename, out IntPtr image);
+
+    [DllImport("gdiplus.dll")]
+    internal static extern int GdipCreateFromHDC(IntPtr deviceContext, out IntPtr graphics);
+
+    [DllImport("gdiplus.dll")]
+    internal static extern int GdipDrawImageRectI(IntPtr graphics, IntPtr image, int x, int y, int width, int height);
+
+    [DllImport("gdiplus.dll")]
+    internal static extern int GdipDeleteGraphics(IntPtr graphics);
+
+    [DllImport("gdiplus.dll")]
+    internal static extern int GdipDisposeImage(IntPtr image);
+
     [DllImport("gdi32.dll")]
     internal static extern uint SetTextColor(IntPtr deviceContext, uint color);
+
+    [DllImport("gdi32.dll")]
+    internal static extern IntPtr GetStockObject(int objectType);
 
     [DllImport("gdi32.dll")]
     internal static extern int SetBkMode(IntPtr deviceContext, int mode);
@@ -496,6 +576,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetLastActivePopup(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

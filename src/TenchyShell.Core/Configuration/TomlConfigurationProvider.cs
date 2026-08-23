@@ -71,6 +71,8 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         var systemTray = GetTable(table, "system_tray");
         var inputLanguage = GetTable(table, "input_language");
         var wallpaper = GetTable(table, "wallpaper");
+        var benchmark = GetTable(table, "benchmark");
+        var notifications = GetTable(table, "notifications");
         var hotkeys = GetTable(table, "hotkeys");
         var workspaceHotkeys = GetTable(hotkeys, "workspaces");
         var windowHotkeys = GetTable(hotkeys, "window");
@@ -168,6 +170,18 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
                     : defaults.Wallpaper.Extensions,
                 Monitor = GetString(wallpaper, "monitor", defaults.Wallpaper.Monitor)
             },
+            Benchmark = new BenchmarkConfiguration
+            {
+                Enabled = GetBoolean(benchmark, "enabled", defaults.Benchmark.Enabled),
+                CaptureProfile = GetString(benchmark, "capture_profile", defaults.Benchmark.CaptureProfile),
+                SampleIntervalSeconds = GetInt(benchmark, "sample_interval_seconds", defaults.Benchmark.SampleIntervalSeconds),
+                RetentionDays = GetInt(benchmark, "retention_days", defaults.Benchmark.RetentionDays),
+                MaxStorageMb = GetInt(benchmark, "max_storage_mb", defaults.Benchmark.MaxStorageMb)
+            },
+            Notifications = new NotificationConfiguration
+            {
+                Enabled = GetBoolean(notifications, "enabled", defaults.Notifications.Enabled)
+            },
             Hotkeys = new HotkeyConfiguration
             {
                 Terminal = GetString(hotkeys, "terminal", defaults.Hotkeys.Terminal),
@@ -220,6 +234,25 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         AddRequiredError(errors, "hotkeys.browser", configuration.Hotkeys.Browser);
         AddRequiredError(errors, "hotkeys.close_window", configuration.Hotkeys.CloseWindow);
         AddRequiredError(errors, "hotkeys.recovery", configuration.Hotkeys.Recovery);
+        if (configuration.Benchmark.Enabled)
+        {
+            if (!string.Equals(configuration.Benchmark.CaptureProfile, "detailed", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("'benchmark.capture_profile' solo admite 'detailed'.");
+            }
+            if (configuration.Benchmark.SampleIntervalSeconds is < 1 or > 3600)
+            {
+                errors.Add("'benchmark.sample_interval_seconds' debe estar entre 1 y 3600.");
+            }
+            if (configuration.Benchmark.RetentionDays is < 1 or > 365)
+            {
+                errors.Add("'benchmark.retention_days' debe estar entre 1 y 365.");
+            }
+            if (configuration.Benchmark.MaxStorageMb is < 16 or > 4096)
+            {
+                errors.Add("'benchmark.max_storage_mb' debe estar entre 16 y 4096.");
+            }
+        }
         if (configuration.Layout.Enabled)
         {
             if (!string.Equals(configuration.Layout.DefaultPreset, "1x2", StringComparison.OrdinalIgnoreCase))

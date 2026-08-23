@@ -5,6 +5,7 @@ using TenchyShell.Core.Logging;
 using TenchyShell.Core.Commands;
 using TenchyShell.Core.Session;
 using TenchyShell.Core.Runtime;
+using TenchyShell.Win32;
 
 namespace TenchyShell.App;
 
@@ -25,6 +26,7 @@ internal static class Program
         var sessionIndex = Array.FindIndex(args, argument => argument.Equals("--session", StringComparison.OrdinalIgnoreCase));
         var withoutExplorer = args.Any(argument => argument.Equals("--without-explorer", StringComparison.OrdinalIgnoreCase));
         var automatedBenchmark = HasArgument(args, "--automated-benchmark");
+        var testNotification = HasArgument(args, "--test-notification");
         var checkOnly = HasArgument(args, "--check");
         if (!TryGetOptionalPositiveInteger(args, "--exit-after-seconds", 3600, out var exitAfterSeconds, out var optionError))
         {
@@ -50,6 +52,18 @@ internal static class Program
                 Console.Error.WriteLine($"- {error}");
             }
 
+            return 1;
+        }
+
+        if (testNotification && !result.Configuration.Benchmark.Enabled)
+        {
+            Console.Error.WriteLine("--test-notification requiere [benchmark] enabled = true.");
+            return 1;
+        }
+
+        if (testNotification && !result.Configuration.Notifications.Enabled)
+        {
+            Console.Error.WriteLine("--test-notification requiere [notifications] enabled = true.");
             return 1;
         }
 
@@ -103,12 +117,6 @@ internal static class Program
             return 0;
         }
 
-        if (withoutExplorer && !automatedBenchmark && !ConfirmExplorerShutdown())
-        {
-            Console.Error.WriteLine("Inicio cancelado: Explorer no dejó de actuar como shell.");
-            return 1;
-        }
-
         if (automatedBenchmark)
         {
             logger.Info($"Benchmark automatizado solicitado; Explorer se restaurará al finalizar en un máximo de {exitAfterSeconds} segundos.");
@@ -137,7 +145,7 @@ internal static class Program
             using (instanceGuard!)
             {
                 using var shell = new ShellHost(result.Configuration, logger, withoutExplorer);
-                return shell.Run(exitAfterSeconds);
+                return shell.Run(exitAfterSeconds, testNotification);
             }
         }
         finally
@@ -149,21 +157,23 @@ internal static class Program
         }
     }
 
-    private static bool ConfirmExplorerShutdown()
-    {
-        if (Console.IsInputRedirected)
-        {
-            Console.Error.WriteLine("--without-explorer requiere una consola interactiva para confirmar la operación.");
-            return false;
-        }
-
-        Console.WriteLine("ADVERTENCIA: se solicitará que Explorer deje de actuar como shell después de registrar los hotkeys.");
-        Console.WriteLine("Usa una VM o un usuario secundario. Escribe DETENER para continuar:");
-        return string.Equals(Console.ReadLine()?.Trim(), "DETENER", StringComparison.OrdinalIgnoreCase);
-    }
-
     private static void EnsureExplorerRunning(ILogger logger)
     {
+        var explorer = new ExplorerShellController();
+        var state = explorer.GetCurrentSessionState();
+        if (state.State == ExplorerShellState.Running)
+        {
+            logger.Info("Recuperación automática del benchmark: explorer.exe ya estaba activo como shell.");
+            return;
+        }
+
+        if (state.State != ExplorerShellState.Stopped)
+        {
+            logger.Error($"Recuperación automática del benchmark cancelada para evitar Explorer duplicado. {state.Message}");
+            Console.Error.WriteLine($"No se iniciará explorer.exe automáticamente: {state.Message}");
+            return;
+        }
+
         using var ownProcess = Process.GetCurrentProcess();
         var sessionId = ownProcess.SessionId;
         var allExplorers = Process.GetProcessesByName("explorer");
@@ -180,12 +190,7 @@ internal static class Program
                 process.Dispose();
             }
         }
-        if (current.Count > 0)
-        {
-            foreach (var process in current) process.Dispose();
-            logger.Info("Recuperación automática del benchmark: explorer.exe ya estaba activo.");
-            return;
-        }
+        foreach (var process in current) process.Dispose();
 
         try
         {
@@ -303,12 +308,14 @@ internal static class Program
         Console.WriteLine("  TenchyShell.exe --launch terminal|files|browser [config.toml]");
         Console.WriteLine("  TenchyShell.exe --without-explorer [config.toml]");
         Console.WriteLine("  TenchyShell.exe --exit-after-seconds N [config.toml]");
+        Console.WriteLine("  TenchyShell.exe --test-notification [config.toml]");
         Console.WriteLine("  TenchyShell.exe --automated-benchmark --without-explorer --exit-after-seconds N [config.toml]");
         Console.WriteLine("  TenchyShell.exe --session logout|shutdown|restart --confirm [config.toml]");
         Console.WriteLine();
         Console.WriteLine("--check valida dependencias y configuración sin registrar hotkeys ni cerrar Explorer.");
-        Console.WriteLine("--without-explorer requiere confirmación y solo debe usarse en una VM o usuario secundario.");
+        Console.WriteLine("--without-explorer registra primero los hotkeys y solo debe usarse en una VM o usuario secundario.");
         Console.WriteLine("--exit-after-seconds cierra limpiamente una sesión de benchmark o integración.");
+        Console.WriteLine("--test-notification muestra una tarjeta local; requiere benchmark y notificaciones habilitados.");
         Console.WriteLine("--automated-benchmark exige un cierre acotado y restaura Explorer al terminar.");
     }
 

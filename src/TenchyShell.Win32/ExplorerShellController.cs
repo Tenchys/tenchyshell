@@ -2,7 +2,15 @@ using System.Diagnostics;
 
 namespace TenchyShell.Win32;
 
-public sealed record ExplorerShellExitResult(bool Succeeded, string Message, int? ProcessId = null);
+public enum ExplorerShellState
+{
+    Stopped,
+    Running,
+    ResidualProcess,
+    Ambiguous
+}
+
+public sealed record ExplorerShellExitResult(bool Succeeded, ExplorerShellState State, string Message, int? ProcessId = null);
 
 /// <summary>
 /// Solicita la salida cooperativa del shell de Explorer en la sesión actual.
@@ -44,17 +52,14 @@ public sealed class ExplorerShellController
         var trayWindow = platform.FindShellTrayWindow();
         if (trayWindow == IntPtr.Zero)
         {
-            int? residualProcessId = initialProcesses.Count == 1 ? initialProcesses[0] : null;
-            return new ExplorerShellExitResult(
-                true,
-                "Shell_TrayWnd ya estaba ausente; Explorer no actuaba como shell y no se solicitó ninguna salida.",
-                residualProcessId);
+            return DescribeAbsentShell(initialProcesses, "Shell_TrayWnd ya estaba ausente; no se solicitó ninguna salida.");
         }
 
         if (initialProcesses.Count != 1)
         {
             return new ExplorerShellExitResult(
                 false,
+                ExplorerShellState.Ambiguous,
                 $"Se requiere exactamente un explorer.exe en la sesión {sessionId}; se encontraron {initialProcesses.Count}.");
         }
 
@@ -64,6 +69,7 @@ public sealed class ExplorerShellController
         {
             return new ExplorerShellExitResult(
                 false,
+                ExplorerShellState.Ambiguous,
                 $"Shell_TrayWnd pertenece al PID {trayProcessId}, no al explorer.exe esperado (PID {initialProcessId}).",
                 initialProcessId);
         }
@@ -72,6 +78,7 @@ public sealed class ExplorerShellController
         {
             return new ExplorerShellExitResult(
                 false,
+                ExplorerShellState.Running,
                 $"Explorer rechazó la solicitud cooperativa de salida (error Win32 {platform.LastError}).",
                 initialProcessId);
         }
@@ -89,14 +96,9 @@ public sealed class ExplorerShellController
                 absentTraySamples++;
                 if (absentTraySamples >= requiredStableSamples)
                 {
-                    var remainingProcesses = platform.GetExplorerProcessIds(sessionId);
-                    var residualProcessMessage = remainingProcesses.Contains(initialProcessId)
-                        ? $" explorer.exe (PID {initialProcessId}) permanece como proceso residual sin bandeja."
-                        : string.Empty;
-                    return new ExplorerShellExitResult(
-                        true,
-                        $"Explorer dejó de actuar como shell y Shell_TrayWnd permaneció ausente durante {stablePeriod.TotalSeconds:0.#} s.{residualProcessMessage}",
-                        initialProcessId);
+                    return DescribeAbsentShell(
+                        platform.GetExplorerProcessIds(sessionId),
+                        $"Shell_TrayWnd permaneció ausente durante {stablePeriod.TotalSeconds:0.#} s.");
                 }
 
                 continue;
@@ -108,6 +110,7 @@ public sealed class ExplorerShellController
             {
                 return new ExplorerShellExitResult(
                     false,
+                    ExplorerShellState.Ambiguous,
                     $"El estado de Explorer se volvió ambiguo: se encontraron {currentProcesses.Count} procesos.",
                     initialProcessId);
             }
@@ -116,6 +119,7 @@ public sealed class ExplorerShellController
             {
                 return new ExplorerShellExitResult(
                     false,
+                    ExplorerShellState.Running,
                     $"Windows relanzó explorer.exe con PID {currentProcesses[0]}; se canceló el modo sin Explorer.",
                     initialProcessId);
             }
@@ -125,6 +129,7 @@ public sealed class ExplorerShellController
             {
                 return new ExplorerShellExitResult(
                     false,
+                    ExplorerShellState.Ambiguous,
                     $"Shell_TrayWnd cambió al PID {currentTrayProcessId}; se canceló el modo sin Explorer.",
                     initialProcessId);
             }
@@ -132,9 +137,29 @@ public sealed class ExplorerShellController
 
         return new ExplorerShellExitResult(
             false,
+            ExplorerShellState.Running,
             $"Shell_TrayWnd de explorer.exe (PID {initialProcessId}) no desapareció de forma estable dentro de {timeout.TotalSeconds:0.#} s.",
             initialProcessId);
     }
+
+    public ExplorerShellExitResult GetCurrentSessionState()
+    {
+        var processes = platform.GetExplorerProcessIds(platform.CurrentSessionId);
+        var tray = platform.FindShellTrayWindow();
+        if (tray == IntPtr.Zero) return DescribeAbsentShell(processes, "Estado actual de Explorer.");
+        if (processes.Count == 1 && platform.GetWindowProcessId(tray) == processes[0])
+        {
+            return new ExplorerShellExitResult(true, ExplorerShellState.Running, "Explorer actúa como shell en la sesión actual.", processes[0]);
+        }
+        return new ExplorerShellExitResult(false, ExplorerShellState.Ambiguous, "Explorer tiene una bandeja o procesos ambiguos en la sesión actual.");
+    }
+
+    private static ExplorerShellExitResult DescribeAbsentShell(IReadOnlyList<int> processes, string prefix) => processes.Count switch
+    {
+        0 => new ExplorerShellExitResult(true, ExplorerShellState.Stopped, $"{prefix} Explorer no tiene procesos en la sesión actual."),
+        1 => new ExplorerShellExitResult(false, ExplorerShellState.ResidualProcess, $"{prefix} explorer.exe (PID {processes[0]}) permanece como proceso residual sin bandeja.", processes[0]),
+        _ => new ExplorerShellExitResult(false, ExplorerShellState.Ambiguous, $"{prefix} Se encontraron {processes.Count} procesos explorer.exe sin bandeja.")
+    };
 }
 
 internal interface IExplorerShellPlatform

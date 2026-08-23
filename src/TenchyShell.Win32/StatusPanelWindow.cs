@@ -16,9 +16,11 @@ public sealed class StatusPanelWindow : IDisposable
     private const uint WS_POPUP = 0x80000000;
     private const nuint TimerId = 1;
     private const uint TimerIntervalMilliseconds = 250;
+    private static readonly TimeSpan WorkspaceAnnouncementDuration = TimeSpan.FromSeconds(1.5);
 
     private readonly StatusPanelConfiguration configuration;
     private readonly ILogger logger;
+    private readonly DesktopAreaPolicy desktopAreaPolicy;
     private readonly NativeMethods.WindowProc windowProcedure;
     private readonly StatusPanelState content = new();
     private readonly StatusPanelVisibilityState visibility = new();
@@ -29,10 +31,11 @@ public sealed class StatusPanelWindow : IDisposable
     private bool timerStarted;
     private bool isDisposed;
 
-    public StatusPanelWindow(StatusPanelConfiguration configuration, ILogger logger)
+    public StatusPanelWindow(StatusPanelConfiguration configuration, ILogger logger, DesktopAreaPolicy? desktopAreaPolicy = null)
     {
         this.configuration = configuration;
         this.logger = logger;
+        this.desktopAreaPolicy = desktopAreaPolicy ?? new DesktopAreaPolicy();
         windowProcedure = WindowProcedure;
         moduleHandle = NativeMethods.GetModuleHandle(null);
     }
@@ -40,6 +43,19 @@ public sealed class StatusPanelWindow : IDisposable
     public bool IsVisible => visibility.IsVisible;
 
     public event Action? TrayRequested;
+
+    /// <summary>
+    /// Suspende el auto-ocultamiento mientras una superficie vinculada al dock
+    /// permanezca abierta. No muestra un panel que ya estuviera oculto.
+    /// </summary>
+    public void SetMenuActive(string menuId, bool isActive)
+    {
+        TryRun("actualizar el estado de un menú del dock", () =>
+        {
+            visibility.SetMenuActive(menuId, isActive);
+            Invalidate();
+        });
+    }
 
     public void Start()
     {
@@ -67,6 +83,19 @@ public sealed class StatusPanelWindow : IDisposable
         TryRun("actualizar el workspace del panel informativo", () =>
         {
             content.SetWorkspace(workspace);
+            Invalidate();
+        });
+    }
+
+    /// <summary>Muestra brevemente el dock al cambiar de workspace sin activarlo.</summary>
+    public void AnnounceWorkspace(int workspace)
+    {
+        TryRun("mostrar el workspace activo", () =>
+        {
+            content.SetWorkspace(workspace);
+            if (!ShowWindowAtDock()) return;
+
+            visibility.ShowWorkspaceAnnouncement(DateTimeOffset.UtcNow, WorkspaceAnnouncementDuration);
             Invalidate();
         });
     }
@@ -130,6 +159,22 @@ public sealed class StatusPanelWindow : IDisposable
 
     private void Show(bool pinnedByHotkey)
     {
+        if (!ShowWindowAtDock()) return;
+
+        if (pinnedByHotkey)
+        {
+            visibility.ToggleByHotkey();
+        }
+        else
+        {
+            visibility.ShowFromEdge();
+        }
+
+        Invalidate();
+    }
+
+    private bool ShowWindowAtDock()
+    {
         EnsureWindow();
         var workArea = GetPrimaryWorkArea();
         var x = workArea.Left;
@@ -145,21 +190,11 @@ public sealed class StatusPanelWindow : IDisposable
                 NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW))
         {
             logger.Error($"No se pudo posicionar el panel informativo. Código Win32: {Marshal.GetLastWin32Error()}.");
-            return;
+            return false;
         }
 
         NativeMethods.ShowWindow(windowHandle, NativeMethods.SW_SHOWNOACTIVATE);
-
-        if (pinnedByHotkey)
-        {
-            visibility.ToggleByHotkey();
-        }
-        else
-        {
-            visibility.ShowFromEdge();
-        }
-
-        Invalidate();
+        return true;
     }
 
     private void Hide()
@@ -183,7 +218,7 @@ public sealed class StatusPanelWindow : IDisposable
             return;
         }
 
-        if (!visibility.IsPinnedByHotkey && !IsPointerInsidePanel())
+        if (visibility.HideWhenPointerLeaves(IsPointerInsidePanel(), DateTimeOffset.UtcNow))
         {
             Hide();
             return;
@@ -229,7 +264,7 @@ public sealed class StatusPanelWindow : IDisposable
 
         if (monitor != IntPtr.Zero && NativeMethods.GetMonitorInfo(monitor, ref monitorInfo))
         {
-            return monitorInfo.Work;
+            return desktopAreaPolicy.UseMonitorArea ? monitorInfo.Monitor : monitorInfo.Work;
         }
 
         return new NativeMethods.Rect

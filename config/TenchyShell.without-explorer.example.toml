@@ -1,6 +1,17 @@
 # Perfil para una VM o usuario secundario sin explorer.exe.
 # No modifica Winlogon y requiere iniciar con --without-explorer.
 
+[benchmark]
+enabled = true
+capture_profile = "detailed"
+sample_interval_seconds = 10
+retention_days = 14
+max_storage_mb = 256
+
+# Requiere instalar y autorizar el bridge MSIX opcional de notificaciones.
+[notifications]
+enabled = true
+
 [terminal]
 command = "wezterm-gui.exe"
 file_manager_arguments = "start --always-new-process --"
@@ -95,38 +106,38 @@ bottom = 1.0
 
 [hotkeys]
 # Win+Enter permanece reservado por Windows incluso sin Explorer.
-terminal = "Ctrl+Alt+Enter"
-files = "Win+E"
-launcher = "Ctrl+Alt+Space"
+terminal = "Win+T"
+files = "Win+F"
+launcher = "Alt+Space"
 browser = "Win+B"
 close_window = "Win+Q"
 recovery = "Ctrl+Alt+Shift+E"
 
 [hotkeys.workspaces]
-switch_1 = "Ctrl+Alt+1"
-switch_2 = "Ctrl+Alt+2"
-switch_3 = "Ctrl+Alt+3"
-switch_4 = "Ctrl+Alt+4"
-switch_5 = "Ctrl+Alt+5"
-switch_6 = "Ctrl+Alt+6"
-switch_7 = "Ctrl+Alt+7"
-switch_8 = "Ctrl+Alt+8"
-switch_9 = "Ctrl+Alt+9"
-move_1 = "Ctrl+Alt+Shift+1"
-move_2 = "Ctrl+Alt+Shift+2"
-move_3 = "Ctrl+Alt+Shift+3"
-move_4 = "Ctrl+Alt+Shift+4"
-move_5 = "Ctrl+Alt+Shift+5"
-move_6 = "Ctrl+Alt+Shift+6"
-move_7 = "Ctrl+Alt+Shift+7"
-move_8 = "Ctrl+Alt+Shift+8"
-move_9 = "Ctrl+Alt+Shift+9"
+switch_1 = "Win+1"
+switch_2 = "Win+2"
+switch_3 = "Win+3"
+switch_4 = "Win+4"
+switch_5 = "Win+5"
+switch_6 = "Win+6"
+switch_7 = "Win+7"
+switch_8 = "Win+8"
+switch_9 = "Win+9"
+move_1 = "Win+Shift+1"
+move_2 = "Win+Shift+2"
+move_3 = "Win+Shift+3"
+move_4 = "Win+Shift+4"
+move_5 = "Win+Shift+5"
+move_6 = "Win+Shift+6"
+move_7 = "Win+Shift+7"
+move_8 = "Win+Shift+8"
+move_9 = "Win+Shift+9"
 
 [hotkeys.window]
-move_left = "Ctrl+Alt+Left"
-move_right = "Ctrl+Alt+Right"
-move_up = "Ctrl+Alt+Up"
-move_down = "Ctrl+Alt+Down"
+move_left = "Ctrl+Win+Left"
+move_right = "Ctrl+Win+Right"
+move_up = "Ctrl+Win+Up"
+move_down = "Ctrl+Win+Down"
 resize_grow = "Ctrl+Alt+Shift+Right"
 resize_shrink = "Ctrl+Alt+Shift+Left"
 maximize = "Ctrl+Alt+M"
@@ -145,4 +156,4 @@ zone_7 = "Ctrl+Win+7"
 zone_8 = "Ctrl+Win+8"
 zone_9 = "Ctrl+Win+9"
 # Modificadores usados durante el arrastre para mostrar el overlay.
-drag_modifier = "Ctrl+Shift"
+drag_modifier = "Ctrl+Win"

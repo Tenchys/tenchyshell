@@ -1,9 +1,11 @@
 using System.Runtime.InteropServices;
 using TenchyShell.Core.Commands;
 using TenchyShell.Core.Configuration;
+using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.InputLanguages;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.Network;
+using TenchyShell.Core.Notifications;
 using TenchyShell.Core.SystemTray;
 using TenchyShell.Core.Wallpaper;
 
@@ -18,6 +20,10 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     private const uint WS_BORDER = 0x00800000;
     private const uint SWP_SHOWWINDOW = 0x0040;
     private const int RowHeight = 30;
+    private const int FirstRowTop = 42;
+    private const uint SelectedRowBackgroundColor = 0x001D1D1D;
+    private const nuint AutoHideTimerId = 1;
+    private const uint AutoHideTimeoutMilliseconds = 1500;
 
     private readonly NativeMethods.WindowProc windowProcedure;
     private readonly string windowClassName = $"TenchyShell.SystemTray.{Guid.NewGuid():N}";
@@ -31,6 +37,10 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     private readonly IInputLanguageService inputLanguageService;
     private readonly ILogger logger;
     private readonly MessageLoopHost messageLoop;
+    private readonly DesktopAreaPolicy desktopAreaPolicy;
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
+    private readonly SystemTrayAutoDismissState autoDismissState = new();
+    private readonly NotificationCenter? notificationCenter;
     private readonly List<RuntimeItem> runtimeItems = new();
     private readonly SemaphoreSlim networkRefreshGate = new(1, 1);
     private SystemTrayState state = new(Array.Empty<SystemTrayItem>());
@@ -42,6 +52,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     private bool isVisible;
     private bool wallpaperMenuOpen;
     private bool inputLanguageMenuOpen;
+    private bool notificationMenuOpen;
     private bool isDisposed;
 
     public SystemTrayService(
@@ -52,7 +63,10 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         IWallpaperService wallpaperService,
         IInputLanguageService inputLanguageService,
         ILogger logger,
-        MessageLoopHost messageLoop)
+        MessageLoopHost messageLoop,
+        DesktopAreaPolicy? desktopAreaPolicy = null,
+        LiveBenchmarkRecorder? benchmarkRecorder = null,
+        NotificationCenter? notificationCenter = null)
     {
         this.shellConfiguration = shellConfiguration;
         configuration = shellConfiguration.SystemTray;
@@ -63,17 +77,35 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         this.inputLanguageService = inputLanguageService;
         this.logger = logger;
         this.messageLoop = messageLoop;
+        this.desktopAreaPolicy = desktopAreaPolicy ?? new DesktopAreaPolicy();
+        this.benchmarkRecorder = benchmarkRecorder;
+        this.notificationCenter = notificationCenter;
+        if (notificationCenter is not null) notificationCenter.Changed += OnNotificationCenterChanged;
         windowProcedure = WindowProcedure;
         moduleHandle = NativeMethods.GetModuleHandle(null);
     }
 
     public bool TryOpen(out string? error)
     {
+        return TryOpen(openedFromPointer: false, out error);
+    }
+
+    /// <summary>Abre la bandeja desde una superficie apuntada por el mouse.</summary>
+    public bool TryOpenFromPointer(out string? error)
+    {
+        return TryOpen(openedFromPointer: true, out error);
+    }
+
+    /// <summary>Notifica las transiciones visibles del menú raíz de la bandeja.</summary>
+    public event Action<bool>? VisibilityChanged;
+
+    private bool TryOpen(bool openedFromPointer, out string? error)
+    {
         try
         {
             ObjectDisposedException.ThrowIf(isDisposed, this);
             if (isVisible) Hide();
-            else Show();
+            else Show(openedFromPointer: openedFromPointer);
             error = null;
             return true;
         }
@@ -99,6 +131,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
             if (!isVisible) Show(inputLanguageMenu: true);
             else
             {
+                DisableAutoHide();
                 inputLanguageMenuOpen = true;
                 wallpaperMenuOpen = false;
                 RefreshInputLanguages();
@@ -119,6 +152,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     public void Dispose()
     {
         if (isDisposed) return;
+        if (notificationCenter is not null) notificationCenter.Changed -= OnNotificationCenterChanged;
         StopRefreshers();
         Hide();
         if (windowHandle != IntPtr.Zero)
@@ -135,7 +169,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private void Show(bool inputLanguageMenu = false)
+    private void Show(bool inputLanguageMenu = false, bool openedFromPointer = false)
     {
         lastForegroundWindow = NativeMethods.GetForegroundWindow();
         EnsureWindow();
@@ -154,6 +188,10 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         NativeMethods.SetForegroundWindow(windowHandle);
         NativeMethods.SetFocus(windowHandle);
         isVisible = true;
+        VisibilityChanged?.Invoke(true);
+        autoDismissState.Open(openedFromPointer, IsPointerOverTray());
+        UpdateAutoHideTimer();
+        TrackPointerLeave();
         StartRefreshers();
         _ = RefreshNetworkAsync();
         _ = RefreshWallpaperCatalogAsync();
@@ -162,9 +200,13 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
 
     private void Hide()
     {
+        var wasVisible = isVisible;
+        StopAutoHideTimer();
+        autoDismissState.Close();
         StopRefreshers();
         if (windowHandle != IntPtr.Zero) NativeMethods.ShowWindow(windowHandle, NativeMethods.SW_HIDE);
         isVisible = false;
+        if (wasVisible) VisibilityChanged?.Invoke(false);
     }
 
     private void LoadItems()
@@ -173,6 +215,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         runtimeItems.Clear();
         wallpaperMenuOpen = false;
         inputLanguageMenuOpen = false;
+        notificationMenuOpen = false;
 
         var configuredItems = configuration.Items.Count > 0
             ? configuration.Items
@@ -181,6 +224,13 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         foreach (var item in configuredItems)
         {
             runtimeItems.Add(new RuntimeItem(item, CreateSnapshot(item)));
+        }
+
+        if (notificationCenter is not null && !runtimeItems.Any(item => item.Snapshot.Id.Equals("notifications", StringComparison.OrdinalIgnoreCase)))
+        {
+            runtimeItems.Add(new RuntimeItem(
+                new SystemTrayItemConfiguration { Id = "notifications", Title = "Notificaciones", Tooltip = "Avisos de la sesión" },
+                CreateNotificationSnapshot()));
         }
 
         if (shellConfiguration.Wallpaper.Enabled && !runtimeItems.Any(item => item.Snapshot.Id.Equals("wallpaper", StringComparison.OrdinalIgnoreCase)))
@@ -431,6 +481,18 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
 
     private void RebuildState()
     {
+        if (notificationMenuOpen && notificationCenter is not null)
+        {
+            var notificationItems = notificationCenter.GetActive()
+                .Select(notification => new SystemTrayItem(
+                    $"notification:{notification.Id}",
+                    notification.AppName,
+                    string.IsNullOrWhiteSpace(notification.Body) ? notification.Title : $"{notification.Title} — {notification.Body}"))
+                .ToList();
+            notificationItems.Add(new SystemTrayItem("notifications-back", "← Notificaciones", "Volver al menú principal"));
+            state = new SystemTrayState(notificationItems);
+            return;
+        }
         if (inputLanguageMenuOpen)
         {
             var languageItems = inputLanguageSnapshot.Languages
@@ -562,6 +624,21 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         return items;
     }
 
+    private SystemTrayItemSnapshot CreateNotificationSnapshot()
+    {
+        var count = notificationCenter?.GetActive().Count ?? 0;
+        return new SystemTrayItemSnapshot(
+            "notifications",
+            "Notificaciones",
+            count == 1 ? "1 activa" : $"{count} activas",
+            "Avisos de la sesión",
+            string.Empty,
+            "ok",
+            "open",
+            false,
+            null);
+    }
+
     private string GetNetworkText(NetworkSnapshot? currentSnapshot = null)
     {
         var snapshot = currentSnapshot ?? networkService.GetSnapshot();
@@ -627,7 +704,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         }
     }
 
-    private static NativeMethods.Rect GetPrimaryWorkArea()
+    private NativeMethods.Rect GetPrimaryWorkArea()
     {
         var monitor = NativeMethods.MonitorFromWindow(IntPtr.Zero, NativeMethods.MONITOR_DEFAULTTOPRIMARY);
         var monitorInfo = new NativeMethods.MonitorInfo
@@ -637,7 +714,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
 
         if (monitor != IntPtr.Zero && NativeMethods.GetMonitorInfo(monitor, ref monitorInfo))
         {
-            return monitorInfo.Work;
+            return desktopAreaPolicy.UseMonitorArea ? monitorInfo.Monitor : monitorInfo.Work;
         }
 
         return new NativeMethods.Rect
@@ -653,6 +730,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     {
         if (message == NativeMethods.WM_KEYDOWN)
         {
+            DisableAutoHide();
             switch (wParam.ToInt32())
             {
                 case NativeMethods.VK_ESCAPE: Hide(); break;
@@ -665,13 +743,51 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         }
         if (message == NativeMethods.WM_LBUTTONUP)
         {
+            // Un clic continúa siendo una interacción de puntero: conservar el
+            // autocierre de una bandeja abierta desde el dock, a diferencia de
+            // la navegación por teclado que lo desactiva explícitamente.
+            StopAutoHideTimer();
             var y = (short)((long)lParam >> 16);
-            var index = (y - 42) / RowHeight;
-            if (index >= 0 && index < state.Items.Count)
+            if (TryGetItemIndex(y, out var index))
             {
-                while (state.SelectedIndex < index) state.Move();
-                while (state.SelectedIndex > index) state.Move(backwards: true);
+                state.TrySelect(index);
                 ActivateSelected();
+            }
+            return IntPtr.Zero;
+        }
+        if (message == NativeMethods.WM_MOUSEMOVE)
+        {
+            autoDismissState.PointerEntered();
+            StopAutoHideTimer();
+            TrackPointerLeave();
+            var y = (short)((long)lParam >> 16);
+            if (TryGetItemIndex(y, out var index) && state.TrySelect(index))
+            {
+                Invalidate();
+            }
+            return IntPtr.Zero;
+        }
+        if (message == NativeMethods.WM_MOUSELEAVE)
+        {
+            autoDismissState.PointerLeft();
+            UpdateAutoHideTimer();
+            return IntPtr.Zero;
+        }
+        if (message == NativeMethods.WM_TIMER && (nuint)wParam == AutoHideTimerId)
+        {
+            StopAutoHideTimer();
+            if (autoDismissState.TimerElapsed(IsPointerOverTray()))
+            {
+                benchmarkRecorder?.Record("system_tray_auto_hidden", new
+                {
+                    reason = "pointer_timeout",
+                    timeoutMs = AutoHideTimeoutMilliseconds
+                });
+                Hide();
+            }
+            else
+            {
+                TrackPointerLeave();
             }
             return IntPtr.Zero;
         }
@@ -717,6 +833,30 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
             inputLanguageMenuOpen = false;
             RebuildState();
             Invalidate();
+            return;
+        }
+
+        if (selected.Id.Equals("notifications", StringComparison.OrdinalIgnoreCase) && notificationCenter is not null)
+        {
+            notificationMenuOpen = true;
+            inputLanguageMenuOpen = false;
+            wallpaperMenuOpen = false;
+            RebuildState();
+            Invalidate();
+            return;
+        }
+
+        if (selected.Id.Equals("notifications-back", StringComparison.OrdinalIgnoreCase))
+        {
+            notificationMenuOpen = false;
+            RebuildState();
+            Invalidate();
+            return;
+        }
+
+        if (selected.Id.StartsWith("notification:", StringComparison.OrdinalIgnoreCase) && notificationCenter is not null)
+        {
+            notificationCenter.RequestDismiss(selected.Id["notification:".Length..]);
             return;
         }
 
@@ -810,6 +950,19 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         const string header = "Bandeja propia de TenchyShell";
         NativeMethods.TextOut(deviceContext, 20, 20, header, header.Length);
         var y = 60;
+        if (state.SelectedItem is not null)
+        {
+            var selectedRow = new NativeMethods.Rect
+            {
+                Left = 8,
+                Top = FirstRowTop + state.SelectedIndex * RowHeight,
+                Right = configuration.Width - 8,
+                Bottom = FirstRowTop + (state.SelectedIndex + 1) * RowHeight
+            };
+            var selectedBackground = NativeMethods.CreateSolidBrush(SelectedRowBackgroundColor);
+            NativeMethods.FillRect(deviceContext, ref selectedRow, selectedBackground);
+            NativeMethods.DeleteObject(selectedBackground);
+        }
         foreach (var (item, index) in state.Items.Select((item, index) => (item, index)))
         {
             NativeMethods.SetTextColor(deviceContext, (uint)(index == state.SelectedIndex ? 0x0000D7FF : 0x00FFFFFF));
@@ -833,7 +986,79 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         NativeMethods.EndPaint(hWnd, ref paintStruct);
     }
 
+    private bool TryGetItemIndex(int clientY, out int index)
+    {
+        index = -1;
+        if (clientY < FirstRowTop) return false;
+
+        var candidate = (clientY - FirstRowTop) / RowHeight;
+        if (candidate < 0 || candidate >= state.Items.Count) return false;
+
+        index = candidate;
+        return true;
+    }
+
     private void RebuildStateAndInvalidate() { RebuildState(); Invalidate(); }
+
+    private void OnNotificationCenterChanged(object? sender, NotificationCenterChangedEventArgs args)
+    {
+        if (isDisposed) return;
+        messageLoop.Post(() =>
+        {
+            if (isDisposed) return;
+            var item = runtimeItems.FirstOrDefault(runtimeItem => runtimeItem.Snapshot.Id.Equals("notifications", StringComparison.OrdinalIgnoreCase));
+            if (item is not null) item.Snapshot = CreateNotificationSnapshot();
+            if (isVisible)
+            {
+                RebuildState();
+                Invalidate();
+            }
+        });
+    }
+
+    private void DisableAutoHide()
+    {
+        autoDismissState.KeyboardInteraction();
+        StopAutoHideTimer();
+    }
+
+    private void UpdateAutoHideTimer()
+    {
+        StopAutoHideTimer();
+        if (!isVisible || !autoDismissState.IsTimerPending || windowHandle == IntPtr.Zero) return;
+
+        if (NativeMethods.SetTimer(windowHandle, AutoHideTimerId, AutoHideTimeoutMilliseconds, IntPtr.Zero) == 0)
+        {
+            logger.Error($"No se pudo programar el autocierre de la bandeja: Win32 error {Marshal.GetLastWin32Error()}.");
+        }
+    }
+
+    private void StopAutoHideTimer()
+    {
+        if (windowHandle != IntPtr.Zero) NativeMethods.KillTimer(windowHandle, AutoHideTimerId);
+    }
+
+    private void TrackPointerLeave()
+    {
+        if (!isVisible || !autoDismissState.IsEnabled || windowHandle == IntPtr.Zero || !IsPointerOverTray()) return;
+
+        var eventData = new NativeMethods.TrackMouseEventData
+        {
+            Size = (uint)Marshal.SizeOf<NativeMethods.TrackMouseEventData>(),
+            Flags = NativeMethods.TME_LEAVE,
+            WindowHandle = windowHandle
+        };
+        NativeMethods.TrackMouseEvent(ref eventData);
+    }
+
+    private bool IsPointerOverTray()
+    {
+        return windowHandle != IntPtr.Zero &&
+               NativeMethods.GetCursorPos(out var point) &&
+               NativeMethods.GetWindowRect(windowHandle, out var rectangle) &&
+               point.X >= rectangle.Left && point.X < rectangle.Right &&
+               point.Y >= rectangle.Top && point.Y < rectangle.Bottom;
+    }
 
     private void Invalidate()
     {

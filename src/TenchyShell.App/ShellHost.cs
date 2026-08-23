@@ -2,8 +2,10 @@ using System.Diagnostics;
 using TenchyShell.Core.Applications;
 using TenchyShell.Core.Commands;
 using TenchyShell.Core.Configuration;
+using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.Network;
+using TenchyShell.Core.Notifications;
 using TenchyShell.Core.Layout;
 using TenchyShell.Core.Processes;
 using TenchyShell.Core.Windows;
@@ -53,11 +55,17 @@ internal sealed class ShellHost : IDisposable
     private readonly LayoutZoneCatalog layoutZoneCatalog;
     private readonly LayoutInteractionHost? layoutInteractionHost;
     private readonly WindowSwitcherWindow? windowSwitcherWindow;
+    private readonly WindowSwitcherAltTabHook? windowSwitcherAltTabHook;
     private readonly SystemTrayService systemTrayService;
     private readonly SystemTrayScriptRunner systemTrayScriptRunner;
     private readonly WallpaperService wallpaperService;
     private readonly IWallpaperStateStore wallpaperStateStore;
     private readonly ExplorerShellController explorerShellController;
+    private readonly DesktopAreaPolicy desktopAreaPolicy;
+    private readonly LiveBenchmarkRecorder benchmarkRecorder;
+    private readonly NotificationCenter notificationCenter;
+    private readonly NotificationBridgeClient? notificationBridgeClient;
+    private readonly NotificationWindow? notificationWindow;
     private bool isDisposed;
 
     public ShellHost(ShellConfiguration configuration, ILogger logger, bool stopExplorerAfterHotkeys = false)
@@ -81,10 +89,23 @@ internal sealed class ShellHost : IDisposable
         applicationCatalog = new WindowsApplicationCatalog();
         applicationLauncher = new ProcessApplicationLauncher(processLauncher, logger);
         launcherWindow = new LauncherWindow(applicationCatalog);
-        windowService = new WindowService();
-        workspaceManager = new WorkspaceManager(new WorkspaceWindowService());
+        desktopAreaPolicy = new DesktopAreaPolicy();
+        benchmarkRecorder = new LiveBenchmarkRecorder(configuration.Benchmark, logger);
+        notificationCenter = new NotificationCenter();
+        notificationBridgeClient = configuration.Notifications.Enabled ? new NotificationBridgeClient(logger) : null;
+        notificationWindow = configuration.Notifications.Enabled
+            ? new NotificationWindow(notificationCenter, logger, messageLoop, desktopAreaPolicy)
+            : null;
+        if (notificationBridgeClient is not null)
+        {
+            notificationBridgeClient.NotificationReceived += OnNotificationReceived;
+            notificationBridgeClient.NotificationRemoved += notificationCenter.Remove;
+            notificationCenter.DismissRequested += notificationBridgeClient.Dismiss;
+        }
+        windowService = new WindowService(desktopAreaPolicy: desktopAreaPolicy);
+        workspaceManager = new WorkspaceManager(new WorkspaceWindowService(benchmarkRecorder));
         statusPanelWindow = configuration.StatusPanel.Enabled
-            ? new StatusPanelWindow(configuration.StatusPanel, logger)
+            ? new StatusPanelWindow(configuration.StatusPanel, logger, desktopAreaPolicy)
             : null;
         layoutZoneCatalog = new LayoutZoneCatalog(configuration.Layout.Zones, configuration.Layout.MaxZones);
         layoutInteractionHost = configuration.Layout.Enabled
@@ -93,10 +114,14 @@ internal sealed class ShellHost : IDisposable
                 windowService,
                 layoutZoneCatalog,
                 configuration.Layout.ZoneNumberSizePercent,
-                logger)
+                logger,
+                desktopAreaPolicy)
             : null;
         windowSwitcherWindow = configuration.WindowSwitcher.Enabled
-            ? new WindowSwitcherWindow(workspaceManager, new WorkspaceWindowService(), configuration.WindowSwitcher)
+            ? new WindowSwitcherWindow(workspaceManager, new WorkspaceWindowService(benchmarkRecorder), configuration.WindowSwitcher, logger, benchmarkRecorder)
+            : null;
+        windowSwitcherAltTabHook = configuration.WindowSwitcher.Enabled && IsAltTabHotkey(configuration.WindowSwitcher.Hotkey)
+            ? new WindowSwitcherAltTabHook(messageLoop, windowSwitcherWindow!, logger)
             : null;
         systemTrayScriptRunner = new SystemTrayScriptRunner();
         wallpaperStateStore = new WallpaperStateStore();
@@ -110,12 +135,15 @@ internal sealed class ShellHost : IDisposable
             wallpaperService,
             new InputLanguageService(),
             logger,
-            messageLoop);
+            messageLoop,
+            desktopAreaPolicy,
+            benchmarkRecorder,
+            configuration.Notifications.Enabled ? notificationCenter : null);
     }
 
     public ShellActions Actions => actions;
 
-    public int Run(int? exitAfterSeconds = null)
+    public int Run(int? exitAfterSeconds = null, bool showBenchmarkTestNotification = false)
     {
         Timer? automaticStopTimer = null;
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
@@ -129,12 +157,14 @@ internal sealed class ShellHost : IDisposable
         launcherWindow.CommandRequested += OnCommandRequested;
         if (statusPanelWindow is not null)
         {
-            statusPanelWindow.TrayRequested += OpenSystemTray;
+            statusPanelWindow.TrayRequested += OpenSystemTrayFromPointer;
+            systemTrayService.VisibilityChanged += OnSystemTrayVisibilityChanged;
         }
 
         try
         {
             ConfigureHotkeys();
+            windowSwitcherAltTabHook?.Start();
             workspaceManager.Refresh();
             statusPanelWindow?.SetWorkspace(workspaceManager.CurrentWorkspace);
             statusPanelWindow?.Start();
@@ -143,6 +173,15 @@ internal sealed class ShellHost : IDisposable
             logger.Info($"Monitores disponibles para layout: {monitors.Count}.");
             logger.Info($"Catálogo de aplicaciones cargado: {applicationCatalog.GetAll().Count} entradas.");
             logger.Info($"TenchyShell iniciado. Terminal configurado: {configuration.Terminal.Command}.");
+            benchmarkRecorder.Start();
+            notificationBridgeClient?.Start();
+            if (configuration.Notifications.Enabled) NotificationBridgeLauncher.Start(logger);
+            if (configuration.Benchmark.Enabled)
+            {
+                var message = $"Benchmark detallado activo. Los registros se guardan en '{benchmarkRecorder.DirectoryPath}' y pueden incluir títulos y comandos.";
+                logger.Info(message);
+                Console.WriteLine(message);
+            }
             logger.Info(stopExplorerAfterHotkeys
                 ? "Modo de prueba sin Explorer solicitado."
                 : "Modo de desarrollo con Explorer disponible.");
@@ -157,6 +196,10 @@ internal sealed class ShellHost : IDisposable
 
                 layoutInteractionHost?.Start();
                 RestoreWallpaperOnStartup();
+                if (showBenchmarkTestNotification)
+                {
+                    ShowBenchmarkTestNotification();
+                }
                 if (exitAfterSeconds.HasValue)
                 {
                     automaticStopTimer = new Timer(
@@ -184,7 +227,8 @@ internal sealed class ShellHost : IDisposable
             launcherWindow.CommandRequested -= OnCommandRequested;
             if (statusPanelWindow is not null)
             {
-                statusPanelWindow.TrayRequested -= OpenSystemTray;
+                statusPanelWindow.TrayRequested -= OpenSystemTrayFromPointer;
+                systemTrayService.VisibilityChanged -= OnSystemTrayVisibilityChanged;
             }
             Console.CancelKeyPress -= OnCancelKeyPress;
             TaskScheduler.UnobservedTaskException -= OnUnobservedTaskException;
@@ -201,8 +245,18 @@ internal sealed class ShellHost : IDisposable
         }
 
         layoutInteractionHost?.Dispose();
+        if (notificationBridgeClient is not null)
+        {
+            notificationBridgeClient.NotificationReceived -= OnNotificationReceived;
+            notificationBridgeClient.NotificationRemoved -= notificationCenter.Remove;
+            notificationCenter.DismissRequested -= notificationBridgeClient.Dismiss;
+            notificationBridgeClient.Dispose();
+        }
+        notificationWindow?.Dispose();
+        benchmarkRecorder.Dispose();
         systemTrayService.Dispose();
         wallpaperService.Dispose();
+        windowSwitcherAltTabHook?.Dispose();
         windowSwitcherWindow?.Dispose();
         statusPanelWindow?.Dispose();
         messageLoop.Dispose();
@@ -212,8 +266,32 @@ internal sealed class ShellHost : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    private void ShowBenchmarkTestNotification()
+    {
+        var notification = new ShellNotification(
+            $"benchmark-{Guid.NewGuid():N}",
+            "TenchyShell.Benchmark",
+            "TenchyShell",
+            "Notificación de prueba",
+            "La superficie de notificaciones está activa en modo benchmark. Este texto usa varias líneas para comprobar que la tarjeta calcula su altura según el contenido completo y no oculta el final del mensaje.",
+            DateTimeOffset.Now);
+        notificationCenter.Add(notification);
+        benchmarkRecorder.Record("notification_test_shown");
+        logger.Info("Notificación local de prueba mostrada en modo benchmark.");
+    }
+
     private void OnRecoveryRequested()
     {
+        var state = explorerShellController.GetCurrentSessionState();
+        if (state.State != ExplorerShellState.Stopped)
+        {
+            var message = $"No se iniciará explorer.exe para evitar un duplicado. {state.Message}";
+            logger.Error(message);
+            benchmarkRecorder.Record("explorer_recovery_blocked", new { state = state.State.ToString(), state.Message, state.ProcessId });
+            Console.Error.WriteLine(message);
+            return;
+        }
+
         try
         {
             Process.Start(new ProcessStartInfo
@@ -221,11 +299,14 @@ internal sealed class ShellHost : IDisposable
                 FileName = "explorer.exe",
                 UseShellExecute = true
             });
+            desktopAreaPolicy.UseMonitorArea = false;
             logger.Info("Se inició explorer.exe mediante el hotkey de recuperación.");
+            benchmarkRecorder.Record("explorer_recovery_started");
         }
         catch (Exception exception)
         {
             logger.Error("No se pudo iniciar explorer.exe mediante el hotkey de recuperación.", exception);
+            benchmarkRecorder.Record("explorer_recovery_failed", new { exception.Message });
             Console.Error.WriteLine($"No se pudo iniciar explorer.exe: {exception.Message}");
         }
     }
@@ -285,6 +366,7 @@ internal sealed class ShellHost : IDisposable
         }
 
         logger.Info($"{result.Message} PID cerrado: {result.ProcessId}.");
+        desktopAreaPolicy.UseMonitorArea = true;
     }
 
     private void ConfigureHotkeys()
@@ -324,9 +406,9 @@ internal sealed class ShellHost : IDisposable
 
         if (configuration.WindowSwitcher.Enabled)
         {
-            if (string.Equals(configuration.WindowSwitcher.Hotkey.Trim(), "Tab", StringComparison.OrdinalIgnoreCase))
+            if (IsAltTabHotkey(configuration.WindowSwitcher.Hotkey))
             {
-                logger.Error("El selector de ventanas no registrará 'Tab' sin modificadores para preservar el Alt+Tab nativo. Usa Ctrl+Alt+Tab.");
+                logger.Info("El selector de ventanas capturará Alt+Tab y mostrará solo el workspace actual.");
             }
             else
             {
@@ -397,6 +479,7 @@ internal sealed class ShellHost : IDisposable
     private void OnHotkeyPressed(int id)
     {
         logger.Info($"Hotkey recibido: {id}.");
+        benchmarkRecorder.Record("hotkey", new { id, action = GetHotkeyDescription(id).ActionName, configuredValue = GetHotkeyDescription(id).ConfiguredValue });
 
         switch (id)
         {
@@ -450,7 +533,7 @@ internal sealed class ShellHost : IDisposable
                 ReportWindowOperation(windowService.RestoreActiveWindow());
                 break;
             case WindowFocusHotkeyId:
-                ReportWindowOperation(windowService.FocusActiveWindow());
+                FocusActiveWindowWithBenchmark();
                 break;
             case StatusPanelHotkeyId when configuration.StatusPanel.Enabled:
                 statusPanelWindow?.ToggleByHotkey();
@@ -459,11 +542,6 @@ internal sealed class ShellHost : IDisposable
                     : "Panel informativo ocultado mediante hotkey.");
                 break;
             case WindowSwitcherHotkeyId when configuration.WindowSwitcher.Enabled:
-                if (KeyboardState.IsAltPressed)
-                {
-                    // Nunca sustituir el Alt+Tab nativo, incluso con una configuración antigua.
-                    break;
-                }
                 windowSwitcherWindow?.Toggle();
                 logger.Info(windowSwitcherWindow?.IsVisible == true
                     ? "Selector de ventanas mostrado."
@@ -479,6 +557,21 @@ internal sealed class ShellHost : IDisposable
                 PlaceActiveWindowInZone(id - LayoutZoneHotkeyStart + 1);
                 break;
         }
+    }
+
+    private void FocusActiveWindowWithBenchmark()
+    {
+        benchmarkRecorder.Record("focus_operation_started");
+        var stopwatch = Stopwatch.StartNew();
+        var result = windowService.FocusActiveWindow();
+        stopwatch.Stop();
+        benchmarkRecorder.Record("focus_operation_completed", new
+        {
+            succeeded = result.Succeeded,
+            error = result.Error,
+            durationMs = stopwatch.Elapsed.TotalMilliseconds
+        });
+        ReportWindowOperation(result);
     }
 
     private void OnHotkeyRegistered(int id)
@@ -526,12 +619,15 @@ internal sealed class ShellHost : IDisposable
         _ => ($"identificador {id}", "desconocido")
     };
 
+    private static bool IsAltTabHotkey(string hotkey) =>
+        string.Equals(hotkey.Trim(), "Alt+Tab", StringComparison.OrdinalIgnoreCase);
+
     private void SwitchWorkspace(int workspace)
     {
         var result = workspaceManager.SwitchTo(workspace);
         if (result.Succeeded)
         {
-            statusPanelWindow?.SetWorkspace(workspace);
+            statusPanelWindow?.AnnounceWorkspace(workspace);
             logger.Info($"Workspace activo: {workspace}.");
         }
         else
@@ -569,7 +665,7 @@ internal sealed class ShellHost : IDisposable
             return;
         }
 
-        var targetRect = LayoutZoneCalculator.ToWindowRect(zone, monitor.WorkArea);
+        var targetRect = LayoutZoneCalculator.ToWindowRect(zone, desktopAreaPolicy.GetArea(monitor));
         ReportWindowOperation(windowService.PlaceActiveWindow(targetRect));
     }
 
@@ -583,6 +679,34 @@ internal sealed class ShellHost : IDisposable
 
         logger.Error($"No se pudo abrir la bandeja del sistema: {error}");
         Console.Error.WriteLine($"No se pudo abrir la bandeja del sistema: {error}");
+    }
+
+    private void OpenSystemTrayFromPointer()
+    {
+        if (systemTrayService.TryOpenFromPointer(out var error))
+        {
+            logger.Info("Se solicitó acceso a la bandeja del sistema mediante el panel.");
+            return;
+        }
+
+        logger.Error($"No se pudo abrir la bandeja del sistema: {error}");
+        Console.Error.WriteLine($"No se pudo abrir la bandeja del sistema: {error}");
+    }
+
+    private void OnSystemTrayVisibilityChanged(bool isVisible)
+    {
+        statusPanelWindow?.SetMenuActive("system-tray", isVisible);
+    }
+
+    private void OnNotificationReceived(NotificationBridgeReceivedEventArgs received)
+    {
+        notificationCenter.Add(received.Notification, showPopup: !received.Historical);
+        benchmarkRecorder.Record("notification_received", new
+        {
+            received.Notification.AppId,
+            hasIcon = received.Notification.IconPng is { Length: > 0 },
+            received.Historical
+        });
     }
 
     private void OpenInputLanguageSelector()
@@ -608,6 +732,7 @@ internal sealed class ShellHost : IDisposable
 
     private void OnApplicationSelected(ApplicationEntry application)
     {
+        benchmarkRecorder.Record("application_requested", new { application.DisplayName, application.Target, application.Arguments });
         var result = applicationLauncher.Launch(application);
 
         if (!result.Succeeded)
@@ -632,6 +757,7 @@ internal sealed class ShellHost : IDisposable
 
     private void OnCommandRequested(string command)
     {
+        benchmarkRecorder.Record("command_requested", new { command });
         var result = actions.LaunchCommand(command);
 
         if (!result.Succeeded)
@@ -650,6 +776,7 @@ internal sealed class ShellHost : IDisposable
 
     private void OnFatalError(Exception exception)
     {
+        benchmarkRecorder.Record("fatal_error", new { exception.Message, exception.StackTrace });
         logger.Error("Error no controlado en TenchyShell.", exception);
         Console.Error.WriteLine($"Error no controlado: {exception.Message}");
         messageLoop.Stop();

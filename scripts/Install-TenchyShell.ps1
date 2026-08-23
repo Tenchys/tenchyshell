@@ -6,6 +6,10 @@ param(
 
     [string]$ExpectedSha256,
 
+    [string]$ReleaseTag,
+
+    [string]$Repository = "Tenchys/tenchyshell",
+
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA "TenchyShell\\app"),
 
     # Permite ejecutar pruebas aisladas sin modificar el perfil del usuario.
@@ -23,11 +27,32 @@ if ([string]::IsNullOrWhiteSpace($UserConfigPath)) {
 }
 $temporaryDirectory = $null
 
-if ([string]::IsNullOrWhiteSpace($SourceDirectory) -eq [string]::IsNullOrWhiteSpace($ArchivePath)) {
-    throw "Indica exactamente uno de -SourceDirectory o -ArchivePath."
+if (@($SourceDirectory, $ArchivePath, $ReleaseTag | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -ne 1) {
+    throw "Indica exactamente uno de -SourceDirectory, -ArchivePath o -ReleaseTag."
 }
 
 try {
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) {
+        if ($Repository -notmatch '^[^/\s]+/[^/\s]+$') {
+            throw "-Repository debe tener el formato propietario/repositorio."
+        }
+        if ($ReleaseTag -match '[\\/:*?"<>|\s]') {
+            throw "-ReleaseTag contiene caracteres no válidos."
+        }
+
+        $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("TenchyShell.Install." + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $temporaryDirectory -Force | Out-Null
+        $assetBaseName = "TenchyShell-$ReleaseTag-win-x64"
+        $releaseBaseUri = "https://github.com/$Repository/releases/download/$ReleaseTag"
+        $ArchivePath = Join-Path $temporaryDirectory "$assetBaseName.zip"
+        $checksumPath = "$ArchivePath.sha256"
+
+        Write-Host "Descargando release $ReleaseTag desde GitHub..."
+        Invoke-WebRequest -Uri "$releaseBaseUri/$assetBaseName.zip" -OutFile $ArchivePath
+        Invoke-WebRequest -Uri "$releaseBaseUri/$assetBaseName.zip.sha256" -OutFile $checksumPath
+        $ExpectedSha256 = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($ArchivePath)) {
         if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
             throw "No se encontró el ZIP del release: '$ArchivePath'."
@@ -52,11 +77,14 @@ try {
             throw "El checksum del ZIP no coincide; la instalación fue cancelada."
         }
 
-        $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("TenchyShell.Install." + [Guid]::NewGuid().ToString("N"))
+        if ($null -eq $temporaryDirectory) {
+            $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("TenchyShell.Install." + [Guid]::NewGuid().ToString("N"))
+        }
+        $extractionDirectory = Join-Path $temporaryDirectory "release"
         # La extracción temporal valida el contenido del ZIP aun en modo
         # simulación; finally la elimina siempre sin dejar residuos.
-        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $temporaryDirectory -WhatIf:$false
-        $SourceDirectory = $temporaryDirectory
+        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $extractionDirectory -WhatIf:$false
+        $SourceDirectory = $extractionDirectory
     }
 
     $releaseExecutable = Join-Path $SourceDirectory "TenchyShell.exe"

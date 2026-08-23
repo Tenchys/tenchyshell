@@ -50,7 +50,8 @@ public sealed class MonitorService
         monitor = new WindowMonitor(
             info.DeviceName,
             (info.Flags & NativeMethods.MONITORINFOF_PRIMARY) != 0,
-            new WindowRect(info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom));
+            new WindowRect(info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom),
+            new WindowRect(info.Monitor.Left, info.Monitor.Top, info.Monitor.Right, info.Monitor.Bottom));
         return monitor.WorkArea.Width > 0 && monitor.WorkArea.Height > 0;
     }
 }

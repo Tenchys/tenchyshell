@@ -17,6 +17,7 @@ public sealed class LayoutInteractionHost : IDisposable
     private readonly IWindowService windowService;
     private readonly LayoutZoneCatalog zoneCatalog;
     private readonly ILogger logger;
+    private readonly DesktopAreaPolicy desktopAreaPolicy;
     private readonly LayoutDragStateMachine dragState = new();
     private readonly LayoutOverlayWindow overlay;
     private readonly NativeMethods.LowLevelHookProc mouseHookProcedure;
@@ -39,12 +40,14 @@ public sealed class LayoutInteractionHost : IDisposable
         IWindowService windowService,
         LayoutZoneCatalog zoneCatalog,
         double zoneNumberSizePercent,
-        ILogger logger)
+        ILogger logger,
+        DesktopAreaPolicy? desktopAreaPolicy = null)
     {
         this.messageLoop = messageLoop;
         this.windowService = windowService;
         this.zoneCatalog = zoneCatalog;
         this.logger = logger;
+        this.desktopAreaPolicy = desktopAreaPolicy ?? new DesktopAreaPolicy();
         overlay = new LayoutOverlayWindow(logger, zoneNumberSizePercent);
         mouseHookProcedure = OnMouseHook;
         keyboardHookProcedure = OnKeyboardHook;
@@ -343,7 +346,7 @@ public sealed class LayoutInteractionHost : IDisposable
         IsModifierPressed(NativeMethods.VK_LSHIFT) ||
         IsModifierPressed(NativeMethods.VK_RSHIFT);
 
-    private static bool TryGetMonitorAtPoint(
+    private bool TryGetMonitorAtPoint(
         NativeMethods.Point point,
         out WindowRect workArea,
         out string monitorId,
@@ -370,7 +373,8 @@ public sealed class LayoutInteractionHost : IDisposable
             return false;
         }
 
-        workArea = new WindowRect(info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom);
+        var area = desktopAreaPolicy.UseMonitorArea ? info.Monitor : info.Work;
+        workArea = new WindowRect(area.Left, area.Top, area.Right, area.Bottom);
         monitorId = info.DeviceName;
         isPrimary = (info.Flags & NativeMethods.MONITORINFOF_PRIMARY) != 0;
         return workArea.Width > 0 && workArea.Height > 0;

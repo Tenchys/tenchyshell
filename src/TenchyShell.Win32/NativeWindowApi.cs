@@ -106,7 +106,12 @@ internal sealed class NativeWindowApi : IWindowNativeApi
                 monitorInfo.Work.Left,
                 monitorInfo.Work.Top,
                 monitorInfo.Work.Right,
-                monitorInfo.Work.Bottom));
+                monitorInfo.Work.Bottom),
+            new WindowRect(
+                monitorInfo.Monitor.Left,
+                monitorInfo.Monitor.Top,
+                monitorInfo.Monitor.Right,
+                monitorInfo.Monitor.Bottom));
         return monitor.WorkArea.Width > 0 && monitor.WorkArea.Height > 0;
     }
 }

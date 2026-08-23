@@ -80,6 +80,10 @@ Verificar que existan `publish/TenchyShell/Debug/win-x64/TenchyShell.dll`, `publ
 - [ ] Con `config/TenchyShell.example.toml`, el elemento `Mouse` actualiza su texto mediante `scripts/mouse-battery.example.ps1`; si no hay batería WMI, muestra `N/D` sin terminar el shell.
 - [ ] `Ctrl+Alt+S`: muestra y oculta el panel informativo sin robar el foco; el borde izquierdo lo muestra temporalmente.
 - [ ] Al hacer clic sobre el panel izquierdo visible, se abre el menú desplegable de bandeja a su derecha.
+- [ ] Con `[notifications] enabled = true`, el bridge MSIX instalado y el permiso concedido mediante `TenchyShell.NotificationBridge.exe --request-access`, generar una notificación de una aplicación normal: aparece una tarjeta en la esquina inferior derecha durante unos seis segundos, sin iniciar Explorer ni robar el foco.
+- [ ] Con `[benchmark] enabled = true` y `[notifications] enabled = true`, iniciar con `--test-notification` y comprobar que se muestra una sola tarjeta local. Sin benchmark o sin notificaciones, el argumento debe rechazar el inicio con un error claro.
+- [ ] Comprobar que la tarjeta muestra el icono de la aplicación si Windows lo entrega; si no existe o es inválido, la notificación sigue siendo legible.
+- [ ] Abrir `Notificaciones` desde la bandeja, verificar el historial de la sesión y descartar un elemento. La aplicación origen conserva el descarte y no se activa ningún contenido.
 - [ ] En la bandeja, `Red` muestra el estado de las interfaces y `Enter` actualiza el centro propio sin iniciar Explorer.
 - [ ] Si existe Wi-Fi, `Red` lista cada SSID con porcentaje de señal, protección y `[Conectar]`/`[Desconectar]`; seleccionar la acción actualiza el estado sin iniciar Explorer.
 - [ ] Si existe Ethernet activa, `Red` indica `Cable`, la IP IPv4 y la velocidad negociada (`100 Mb/s`, `1 Gb/s` o similar), y permite `[Desconectar]`.
@@ -99,7 +103,7 @@ Solo en una VM o usuario secundario:
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-explorer config/TenchyShell.without-explorer.example.toml
 ```
 
-- [ ] Escribir `DETENER` y confirmar que `Shell_TrayWnd` desaparece tras registrar el hotkey de recuperación. Si ya estaba ausente por un intento anterior, TenchyShell continúa sin solicitar otra salida. `explorer.exe` puede permanecer como proceso residual sin bandeja; no se termina a la fuerza.
+- [ ] Iniciar el perfil sin Explorer y confirmar que `Shell_TrayWnd` desaparece tras registrar el hotkey de recuperación, sin solicitar escribir `DETENER`. Si ya estaba ausente por un intento anterior, TenchyShell continúa sin solicitar otra salida. `explorer.exe` puede permanecer como proceso residual sin bandeja; no se termina a la fuerza.
 - [ ] Confirmar que el modo no cambia Winlogon ni mata automáticamente una nueva instancia de Explorer iniciada por Windows; la recuperación sigue siendo manual mediante el hotkey.
 - [ ] Probar launcher, terminal, Yazi, navegador y cierre de ventana.
 - [ ] Pulsar `Ctrl+Alt+Shift+E` y comprobar que Explorer vuelve a iniciarse.

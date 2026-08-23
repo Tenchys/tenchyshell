@@ -6,11 +6,16 @@ TenchyShell fue desarrollado con asistencia de OpenAI Codex, manteniendo una arq
 
 ## Estado actual
 
-El MVP 0.7.6 consolida el producto bajo el nombre TenchyShell. Incluye el
+El MVP 0.7 consolida el producto bajo el nombre TenchyShell. Incluye el
 message loop Win32, recuperación de Explorer, launcher, workspaces, gestión y
 layout de ventanas, panel, bandeja propia, red, fondos e idioma de teclado. La
 aplicación mantiene una única instancia compatible con el mutex heredado y las
 consultas de red del dock se ejecutan fuera del message loop.
+
+## Documentación
+
+La documentación completa para uso, instalación, configuración, arquitectura,
+desarrollo y operación segura está en [docs/README.md](docs/README.md).
 
 ## Requisitos
 
@@ -21,14 +26,20 @@ consultas de red del dock se ejecutan fuera del message loop.
 
 ## Instalación
 
-Cada tag `vX.Y.Z` genera un GitHub Release `win-x64` auto-contenido: no requiere instalar el SDK ni el runtime de .NET. Descarga el ZIP, su archivo `.sha256` y el bootstrapper; después valida e instala desde PowerShell:
+Cada tag `vX.Y.Z` genera un GitHub Release `win-x64` auto-contenido: no requiere instalar el SDK ni el runtime de .NET. Descarga el asset `Install-TenchyShell.ps1` del release y ejecútalo con el tag:
+
+```powershell
+.\Install-TenchyShell.ps1 -ReleaseTag vX.Y.Z
+```
+
+El bootstrapper descarga el ZIP y su archivo `.sha256` del mismo release, valida el checksum y después instala. Como alternativa, puedes descargar los tres assets manualmente y usar el ZIP local:
 
 ```powershell
 $hash = Get-Content .\TenchyShell-vX.Y.Z-win-x64.zip.sha256
 .\Install-TenchyShell.ps1 -ArchivePath .\TenchyShell-vX.Y.Z-win-x64.zip -ExpectedSha256 $hash
 ```
 
-El bootstrapper instala TenchyShell en `%LOCALAPPDATA%\TenchyShell\app`, detecta WezTerm y Yazi e instala los paquetes oficiales de WinGet cuando faltan. Usa `-SkipDependencies` si ya los gestionas manualmente y `-WhatIf` para revisar las operaciones sin escribir ni instalar. Requiere WinGet y red solo para las dependencias faltantes.
+El bootstrapper instala TenchyShell en `%LOCALAPPDATA%\TenchyShell\app`, detecta WezTerm y Yazi e instala los paquetes oficiales de WinGet cuando faltan. Usa `-SkipDependencies` si ya los gestionas manualmente y `-WhatIf` para revisar las operaciones sin escribir ni instalar. Requiere WinGet y red solo para las dependencias faltantes. Repetirlo con un tag nuevo actualiza el binario y conserva la configuración de usuario.
 
 La instalación nunca instala un navegador: el perfil inicial usa `msedge.exe`, que puedes cambiar en el TOML.
 
@@ -184,9 +195,18 @@ oficial puede verificarse el instrumental con
 `scripts\test-performance.ps1`; los smoke tests quedan marcados como no
 oficiales y no pueden mezclarse con la comparativa final.
 
+Para observar un flujo de trabajo real instalado, habilita `[benchmark]` en el
+TOML. Este modo no cierra Explorer ni altera la sesión: crea registros JSONL
+diarios en `%LOCALAPPDATA%\TenchyShell\benchmarks\live\`, conserva 14 días y
+un máximo de 256 MB por defecto. El perfil `detailed` puede guardar títulos de
+ventana y comandos solicitados desde TenchyShell; revisa esos archivos antes de
+compartirlos.
+
 ## Hotkeys
 
 Los valores de `[hotkeys]` en el TOML se registran al iniciar el shell. Las combinaciones repetidas se rechazan antes de entrar en modo operativo; si Windows u otra aplicación ya reservó una combinación opcional, el error queda en consola y en el log, mientras TenchyShell continúa funcionando.
+
+El selector de ventanas usa `Alt+Tab` por defecto y reemplaza el conmutador de Windows mientras TenchyShell está activo: enumera únicamente el workspace actual. Mantén Alt, usa Tab o Shift+Tab para recorrer y suelta Alt para confirmar; Escape cancela. Puedes configurar otro atajo si necesitas conservar el comportamiento nativo.
 
 - `Ctrl+Alt+Enter`: terminal.
 - `Ctrl+Alt+E`: terminal con Yazi.
@@ -240,6 +260,14 @@ interno. Su bandeja es propia y solo expone integraciones declaradas.
 `Ctrl+Alt+T` abre la superficie de bandeja propia de TenchyShell. También puede abrirse haciendo clic sobre el panel izquierdo cuando está visible; el menú aparece desplegado a su derecha. No inicia, enfoca ni usa `explorer.exe`. La superficie ya tiene navegación por teclado y ciclo de vida propio; los iconos de aplicaciones de terceros requieren integración explícita porque Windows no ofrece una API pública para enumerarlos o reubicarlos automáticamente.
 
 Los elementos estáticos y dinámicos se configuran en `[system_tray]`. Un elemento dinámico ejecuta el `command` con sus `arguments` y debe devolver JSON con `text`, `tooltip`, `icon`, `state` y `action`. Consulta `scripts/mouse-battery.example.ps1` como ejemplo; el script puede reemplazarse por uno específico del fabricante del dispositivo.
+
+### Notificaciones
+
+El hito 0.7.10 incorpora un centro de notificaciones de sesión independiente de Explorer. Para mantener el coste nulo en instalaciones normales, `[notifications] enabled` permanece desactivado por defecto. Al habilitarlo, TenchyShell inicia el bridge MSIX opcional en segundo plano y recibe los eventos mediante un pipe local: no hay polling.
+
+El bridge se compila en `src/TenchyShell.NotificationBridge`. Debe empaquetarse, firmarse e instalarse como MSIX con la capacidad `userNotificationListener`; al primer inicio Windows solicita el permiso. Las notificaciones nuevas se muestran hasta seis segundos en la esquina inferior derecha, incluyen el icono de la aplicación cuando Windows lo entrega y permanecen durante la sesión en el elemento `Notificaciones` de la bandeja. Desde allí se pueden descartar, sin activar contenido ni ejecutar acciones de terceros. Consulta la guía completa en [Notificaciones](docs/NOTIFICATIONS.md).
+
+Para validar la superficie antes de empaquetar el bridge, el argumento `--test-notification` genera una única tarjeta local. Solo está permitido cuando `[benchmark] enabled = true` y `[notifications] enabled = true`; no se ejecuta automáticamente ni se incluye fuera de benchmark.
 
 ### Idioma de teclado
 
@@ -324,9 +352,11 @@ Solo en una VM o usuario secundario, TenchyShell puede detener Explorer tras hab
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-explorer config/TenchyShell.without-explorer.example.toml
 ```
 
-El programa exige escribir `DETENER` en una consola interactiva antes de cerrar `explorer.exe`; después registra los hotkeys opcionales. No modifica Winlogon. Usa el hotkey configurado en `recovery` para iniciar Explorer nuevamente.
+El programa registra primero los hotkeys antes de solicitar la salida cooperativa de `explorer.exe`. No modifica Winlogon. Usa el hotkey configurado en `recovery` para iniciar Explorer nuevamente.
 
 La prueba sin Explorer debe hacerse únicamente en una máquina virtual o con un usuario secundario. No modificar Winlogon. Para recuperar una sesión, pulsa el hotkey de recuperación, espera que Explorer aparezca y luego cierra TenchyShell con `Ctrl+C`.
+
+Cuando la salida de Explorer termina limpiamente, TenchyShell usa el área completa de cada monitor para sus operaciones de layout, movimiento, redimensionado, panel y bandeja. Al recuperar Explorer vuelve a respetar el área reservada por su taskbar; TenchyShell no modifica el área global de trabajo de Windows.
 
 ## Seguridad durante el desarrollo
 

@@ -30,12 +30,21 @@ public sealed class StatusPanelState
 
 public sealed class StatusPanelVisibilityState
 {
+    private readonly HashSet<string> activeMenus = new(StringComparer.Ordinal);
+    private DateTimeOffset? workspaceAnnouncementExpiresAt;
+
     public bool IsVisible { get; private set; }
 
     public bool IsPinnedByHotkey { get; private set; }
 
+    public bool HasActiveMenus => activeMenus.Count > 0;
+
+    public bool HasActiveWorkspaceAnnouncement(DateTimeOffset now) =>
+        workspaceAnnouncementExpiresAt is { } expiresAt && now < expiresAt;
+
     public bool ToggleByHotkey()
     {
+        workspaceAnnouncementExpiresAt = null;
         if (IsVisible && IsPinnedByHotkey)
         {
             IsVisible = false;
@@ -52,11 +61,24 @@ public sealed class StatusPanelVisibilityState
     {
         IsVisible = true;
         IsPinnedByHotkey = false;
+        workspaceAnnouncementExpiresAt = null;
     }
 
-    public bool HideWhenPointerLeaves(bool pointerInsidePanel)
+    public void ShowWorkspaceAnnouncement(DateTimeOffset now, TimeSpan duration)
     {
-        if (!IsVisible || IsPinnedByHotkey || pointerInsidePanel)
+        if (duration <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(duration), "La duración del anuncio debe ser positiva.");
+        }
+
+        IsVisible = true;
+        workspaceAnnouncementExpiresAt = now.Add(duration);
+    }
+
+    public bool HideWhenPointerLeaves(bool pointerInsidePanel, DateTimeOffset? now = null)
+    {
+        if (!IsVisible || IsPinnedByHotkey || HasActiveMenus || pointerInsidePanel ||
+            HasActiveWorkspaceAnnouncement(now ?? DateTimeOffset.UtcNow))
         {
             return false;
         }
@@ -69,6 +91,21 @@ public sealed class StatusPanelVisibilityState
     {
         IsVisible = false;
         IsPinnedByHotkey = false;
+        workspaceAnnouncementExpiresAt = null;
+    }
+
+    public void SetMenuActive(string menuId, bool isActive)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(menuId);
+
+        if (isActive)
+        {
+            activeMenus.Add(menuId);
+        }
+        else
+        {
+            activeMenus.Remove(menuId);
+        }
     }
 }
 

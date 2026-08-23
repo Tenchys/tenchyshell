@@ -7,11 +7,13 @@ public sealed class WindowService : IWindowService
 {
     private readonly IWindowNativeApi nativeApi;
     private readonly uint currentProcessId;
+    private readonly DesktopAreaPolicy desktopAreaPolicy;
 
-    public WindowService(IWindowNativeApi? nativeApi = null, uint? currentProcessId = null)
+    public WindowService(IWindowNativeApi? nativeApi = null, uint? currentProcessId = null, DesktopAreaPolicy? desktopAreaPolicy = null)
     {
         this.nativeApi = nativeApi ?? new NativeWindowApi();
         this.currentProcessId = currentProcessId ?? (uint)Environment.ProcessId;
+        this.desktopAreaPolicy = desktopAreaPolicy ?? new DesktopAreaPolicy();
     }
 
     public WindowCloseResult CloseActiveWindow()
@@ -47,10 +49,12 @@ public sealed class WindowService : IWindowService
         }
 
         if (!nativeApi.TryGetWindowRect(windowHandle, out var windowRect) ||
-            !nativeApi.TryGetWorkArea(windowHandle, out var workArea))
+            !nativeApi.TryGetMonitor(windowHandle, out var monitor))
         {
             return WindowOperationResult.Failure("No se pudo obtener la geometría del monitor o de la ventana activa.");
         }
+
+        var workArea = desktopAreaPolicy.GetArea(monitor);
 
         var left = Clamp(windowRect.Left + deltaX, workArea.Left, workArea.Right - windowRect.Width);
         var top = Clamp(windowRect.Top + deltaY, workArea.Top, workArea.Bottom - windowRect.Height);
@@ -65,10 +69,12 @@ public sealed class WindowService : IWindowService
         }
 
         if (!nativeApi.TryGetWindowRect(windowHandle, out var windowRect) ||
-            !nativeApi.TryGetWorkArea(windowHandle, out var workArea))
+            !nativeApi.TryGetMonitor(windowHandle, out var monitor))
         {
             return WindowOperationResult.Failure("No se pudo obtener la geometría del monitor o de la ventana activa.");
         }
+
+        var workArea = desktopAreaPolicy.GetArea(monitor);
 
         var width = Clamp(windowRect.Width + deltaWidth, 160, workArea.Width);
         var height = Clamp(windowRect.Height + deltaHeight, 120, workArea.Height);
@@ -79,7 +85,25 @@ public sealed class WindowService : IWindowService
         return SetWindowPosition(windowHandle, new WindowRect(left, top, right, bottom));
     }
 
-    public WindowOperationResult MaximizeActiveWindow() => ShowActiveWindow(NativeMethods.SW_MAXIMIZE);
+    public WindowOperationResult MaximizeActiveWindow()
+    {
+        if (!desktopAreaPolicy.UseMonitorArea)
+        {
+            return ShowActiveWindow(NativeMethods.SW_MAXIMIZE);
+        }
+
+        if (!TryGetActiveWindow(out var windowHandle, out var error))
+        {
+            return WindowOperationResult.Failure(error!);
+        }
+
+        if (!nativeApi.TryGetMonitor(windowHandle, out var monitor))
+        {
+            return WindowOperationResult.Failure("No se pudo obtener el monitor para maximizar la ventana activa.");
+        }
+
+        return PlaceWindow(windowHandle, desktopAreaPolicy.GetArea(monitor));
+    }
 
     public WindowOperationResult RestoreActiveWindow() => ShowActiveWindow(NativeMethods.SW_RESTORE);
 
@@ -104,7 +128,7 @@ public sealed class WindowService : IWindowService
             return false;
         }
 
-        workArea = monitor.WorkArea;
+        workArea = desktopAreaPolicy.GetArea(monitor);
         return true;
     }
 
@@ -161,7 +185,7 @@ public sealed class WindowService : IWindowService
             return WindowOperationResult.Failure("No se pudo obtener el monitor destino de la ventana.");
         }
 
-        var workArea = targetMonitor.WorkArea;
+        var workArea = desktopAreaPolicy.GetArea(targetMonitor);
         var width = Math.Min(targetRect.Width, workArea.Width);
         var height = Math.Min(targetRect.Height, workArea.Height);
         var left = Clamp(targetRect.Left, workArea.Left, workArea.Right - width);

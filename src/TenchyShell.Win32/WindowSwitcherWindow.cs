@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using TenchyShell.Core.Configuration;
+using TenchyShell.Core.Diagnostics;
+using TenchyShell.Core.Logging;
 using TenchyShell.Core.Windows;
 
 namespace TenchyShell.Win32;
@@ -18,6 +21,9 @@ public sealed class WindowSwitcherWindow : IDisposable
     private readonly IWorkspaceWindowSource workspaceSource;
     private readonly IWorkspaceWindowService windowService;
     private readonly WindowSwitcherConfiguration configuration;
+    private readonly ILogger? logger;
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
+    private readonly WindowFocusRestrictionCache focusRestrictionCache = new();
     private IntPtr windowHandle;
     private IntPtr previousForegroundWindow;
     private ushort windowClassAtom;
@@ -28,11 +34,15 @@ public sealed class WindowSwitcherWindow : IDisposable
     public WindowSwitcherWindow(
         IWorkspaceWindowSource workspaceSource,
         IWorkspaceWindowService windowService,
-        WindowSwitcherConfiguration configuration)
+        WindowSwitcherConfiguration configuration,
+        ILogger? logger = null,
+        LiveBenchmarkRecorder? benchmarkRecorder = null)
     {
         this.workspaceSource = workspaceSource;
         this.windowService = windowService;
         this.configuration = configuration;
+        this.logger = logger;
+        this.benchmarkRecorder = benchmarkRecorder?.IsEnabled == true ? benchmarkRecorder : null;
         windowProcedure = WindowProcedure;
         moduleHandle = NativeMethods.GetModuleHandle(null);
     }
@@ -51,13 +61,32 @@ public sealed class WindowSwitcherWindow : IDisposable
         }
     }
 
+    /// <summary>Inicia o avanza el conmutador reteniendo Alt.</summary>
+    public void BeginAltTab(bool backwards)
+    {
+        if (!isVisible)
+        {
+            Show();
+        }
+
+        state.Move(backwards, GetVisibleItemCount());
+        Invalidate();
+    }
+
+    public void ConfirmSelection() => Confirm();
+
+    public void CancelSelection() => Hide(restorePreviousFocus: true);
+
     public void Show()
     {
         ObjectDisposedException.ThrowIf(isDisposed, this);
         workspaceSource.Refresh();
-        state = new WindowSwitcherState(
-            workspaceSource.GetCurrentWorkspaceWindows()
-                .Select(handle => new WindowSwitcherItem(handle, windowService.GetWindowTitle(handle))));
+        var workspaceItems = workspaceSource.GetCurrentWorkspaceWindows()
+            .Select(handle => new WindowSwitcherItem(handle, windowService.GetWindowTitle(handle)))
+            .ToArray();
+        focusRestrictionCache.Reconcile(workspaceItems);
+        state = new WindowSwitcherState(workspaceItems
+            .Select(item => item with { FocusRestricted = focusRestrictionCache.IsRestricted(item.Handle, item.Title) }));
         previousForegroundWindow = windowService.GetForegroundWindow();
         EnsureWindow();
 
@@ -234,9 +263,68 @@ public sealed class WindowSwitcherWindow : IDisposable
     private void Confirm()
     {
         var selected = state.SelectedItem;
+
+        if (selected is null)
+        {
+            Hide(restorePreviousFocus: false);
+            logger?.Error("El selector no tenía una ventana válida para enfocar.");
+            return;
+        }
+
+        if (selected.FocusRestricted)
+        {
+            benchmarkRecorder?.Record("window_switcher_confirmation", new
+            {
+                selectedHandle = selected.Handle.ToInt64(),
+                selectedTitle = selected.Title,
+                focused = false,
+                failure = WorkspaceFocusFailure.AccessDenied.ToString(),
+                skippedKnownRestriction = true
+            });
+            Hide(restorePreviousFocus: false);
+            logger?.Info($"El selector omitió HWND {selected.Handle} ('{selected.Title}') por restricción de foco conocida.");
+            if (previousForegroundWindow != IntPtr.Zero) windowService.Focus(previousForegroundWindow);
+            return;
+        }
+
+        var foregroundBefore = windowService.GetForegroundWindow();
+        var stopwatch = Stopwatch.StartNew();
+        // El selector todavía posee el foreground aquí. Ocultarlo antes de esta
+        // llamada permite a Windows devolver el foco a la ventana anterior y
+        // rechazar el cambio solicitado por TenchyShell.
+        var focusResult = windowService.Focus(selected.Handle);
+        stopwatch.Stop();
+        var foregroundAfter = windowService.GetForegroundWindow();
+        benchmarkRecorder?.Record("window_switcher_confirmation", new
+        {
+            selectedHandle = selected.Handle.ToInt64(),
+            selectedTitle = selected.Title,
+            foregroundBefore = foregroundBefore.ToInt64(),
+            foregroundAfter = foregroundAfter.ToInt64(),
+            focused = focusResult.Succeeded,
+            failure = focusResult.Failure.ToString(),
+            durationMs = stopwatch.Elapsed.TotalMilliseconds
+        });
         Hide(restorePreviousFocus: false);
 
-        if (selected is not null && !windowService.Focus(selected.Handle) && previousForegroundWindow != IntPtr.Zero)
+        if (focusResult.Succeeded)
+        {
+            logger?.Info($"Selector enfocó HWND {selected.Handle} ('{selected.Title}').");
+            return;
+        }
+
+        if (focusResult.Failure == WorkspaceFocusFailure.AccessDenied)
+        {
+            focusRestrictionCache.Remember(selected.Handle, selected.Title, focusResult.Failure);
+            const string message = "Windows restringió el foco de esta ventana por permisos. TenchyShell continuará sin elevación y restaurará la ventana anterior.";
+            logger?.Error($"El selector no pudo enfocar HWND {selected.Handle} ('{selected.Title}'): {message}");
+            NativeMethods.MessageBox(IntPtr.Zero, message, "TenchyShell — foco restringido", NativeMethods.MB_OK | NativeMethods.MB_ICONWARNING);
+        }
+        else
+        {
+            logger?.Error($"El selector no pudo enfocar HWND {selected.Handle} ('{selected.Title}'); se restaurará el foco anterior.");
+        }
+        if (previousForegroundWindow != IntPtr.Zero)
         {
             windowService.Focus(previousForegroundWindow);
         }
@@ -264,8 +352,9 @@ public sealed class WindowSwitcherWindow : IDisposable
                      .Take(visibleItemCount)
                      .Select((item, index) => (item, index + state.FirstVisibleIndex)))
         {
-            NativeMethods.SetTextColor(deviceContext, (uint)(index == state.SelectedIndex ? 0x0000D7FF : 0x00FFFFFF));
-            var line = $"{(index == state.SelectedIndex ? "> " : "  ")}{item.Title}";
+            NativeMethods.SetTextColor(deviceContext, (uint)(index == state.SelectedIndex ? 0x0000D7FF : item.FocusRestricted ? 0x0000A5FF : 0x00FFFFFF));
+            var restriction = item.FocusRestricted ? " — foco restringido por permisos" : string.Empty;
+            var line = $"{(index == state.SelectedIndex ? "> " : "  ")}{item.Title}{restriction}";
             NativeMethods.TextOut(deviceContext, 24, y, line, line.Length);
             y += 34;
         }

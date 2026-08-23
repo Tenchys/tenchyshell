@@ -27,7 +27,7 @@ monitor = "primary"
 
 [window_switcher]
 enabled = true
-hotkey = "Ctrl+Alt+Tab"
+hotkey = "Alt+Tab"
 width = 680
 height = 420
 title_format = "TenchyShell — Workspace {workspace}"
@@ -53,6 +53,19 @@ enabled = true
 folder = ""
 extensions = [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"]
 monitor = "all"
+
+# Captura diagnósticos detallados de una sesión real. Los archivos pueden incluir
+# títulos de ventana y comandos iniciados por TenchyShell; no los compartas sin revisarlos.
+[benchmark]
+enabled = false
+capture_profile = "detailed"
+sample_interval_seconds = 10
+retention_days = 14
+max_storage_mb = 256
+
+# Requiere instalar y autorizar el bridge MSIX opcional de notificaciones.
+[notifications]
+enabled = false
 
 # Los elementos definidos aquí sustituyen la lista integrada de ejemplo.
 # Un elemento sin command es estático; uno con command se actualiza mediante JSON.

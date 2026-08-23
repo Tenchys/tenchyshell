@@ -2,6 +2,8 @@
   <Project Path="src/TenchyShell.App/TenchyShell.App.csproj" />
   <Project Path="src/TenchyShell.Core/TenchyShell.Core.csproj" />
   <Project Path="src/TenchyShell.Win32/TenchyShell.Win32.csproj" />
+  <Project Path="src/TenchyShell.NotificationBridge/TenchyShell.NotificationBridge.csproj" />
+  <Project Path="src/TenchyShell.NotificationTestSender/TenchyShell.NotificationTestSender.csproj" />
   <Project Path="src/TenchyShell.Workspaces/TenchyShell.Workspaces.csproj" />
   <Project Path="src/TenchyShell.UI/TenchyShell.UI.csproj" />
   <Project Path="tests/TenchyShell.Core.Tests/TenchyShell.Core.Tests.csproj" />

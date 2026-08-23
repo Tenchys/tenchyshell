@@ -20,6 +20,9 @@ Describe "Install-TenchyShell.ps1" {
         $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
         { & $installer -SourceDirectory $release -ArchivePath $archive -ExpectedSha256 $hash -SkipDependencies -InstallDirectory $installDirectory -UserConfigPath $userConfig } |
             Should -Throw "*exactamente uno*"
+
+        { & $installer -SourceDirectory $release -ReleaseTag "v0.7.12" -SkipDependencies -InstallDirectory $installDirectory -UserConfigPath $userConfig } |
+            Should -Throw "*exactamente uno*"
     }
 
     It "rejects a missing archive, an invalid checksum, and a mismatched checksum" {
@@ -69,6 +72,25 @@ Describe "Install-TenchyShell.ps1" {
         Test-Path -LiteralPath (Join-Path $installDirectory "TenchyShell.exe") | Should -BeTrue
         Test-Path -LiteralPath $userConfig | Should -BeTrue
         Test-Path -LiteralPath (Join-Path (Split-Path -Parent $userConfig) "scripts\\mouse-battery.example.ps1") | Should -BeTrue
+    }
+
+    It "downloads, verifies and installs a release tag" {
+        $archive = Join-Path $release "release.zip"
+        Compress-Archive -Path (Join-Path $release "*") -DestinationPath $archive
+        $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+
+        Mock Invoke-WebRequest {
+            param($Uri, $OutFile)
+            if ($Uri.AbsoluteUri.EndsWith(".sha256")) {
+                Set-Content -LiteralPath $OutFile -Value $hash -NoNewline
+            } else {
+                Copy-Item -LiteralPath $archive -Destination $OutFile
+            }
+        }
+
+        & $installer -ReleaseTag "v0.7.12" -Repository "Tenchys/tenchyshell" -SkipDependencies -InstallDirectory $installDirectory -UserConfigPath $userConfig
+
+        Test-Path -LiteralPath (Join-Path $installDirectory "TenchyShell.exe") | Should -BeTrue
     }
 
     It "preserves an existing configuration and example script" {

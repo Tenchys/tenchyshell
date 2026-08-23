@@ -42,4 +42,16 @@ public sealed class SystemTrayState
             ? (SelectedIndex - 1 + items.Count) % items.Count
             : (SelectedIndex + 1) % items.Count;
     }
+
+    /// <summary>Selecciona una fila visible sin alterar el estado ante un índice inválido.</summary>
+    public bool TrySelect(int index)
+    {
+        if (index < 0 || index >= items.Count || index == SelectedIndex)
+        {
+            return false;
+        }
+
+        SelectedIndex = index;
+        return true;
+    }
 }

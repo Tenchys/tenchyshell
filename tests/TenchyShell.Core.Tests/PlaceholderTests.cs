@@ -5,6 +5,7 @@ using TenchyShell.Core.Configuration;
 using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.Network;
+using TenchyShell.Core.Notifications;
 using TenchyShell.Core.Layout;
 using TenchyShell.Core.Processes;
 using TenchyShell.Core.Session;
@@ -222,6 +223,102 @@ public sealed class PlaceholderTests
         Assert.Equal("input-language:409", state.SelectedItem?.Id);
     }
 
+    [Fact]
+    public void SystemTrayStateSelectsValidMouseRowAndIgnoresInvalidIndices()
+    {
+        var state = new SystemTrayState(new[]
+        {
+            new SystemTrayItem("shell", "TenchyShell", "Activo"),
+            new SystemTrayItem("network", "Red", "Disponible")
+        });
+
+        Assert.True(state.TrySelect(1));
+        Assert.Equal("network", state.SelectedItem?.Id);
+        Assert.False(state.TrySelect(1));
+        Assert.False(state.TrySelect(-1));
+        Assert.False(state.TrySelect(2));
+        Assert.Equal("network", state.SelectedItem?.Id);
+    }
+
+    [Fact]
+    public void NotificationCenterKeepsSessionHistoryAndSuppressesHistoricalPopup()
+    {
+        var center = new NotificationCenter();
+        NotificationCenterChangedEventArgs? change = null;
+        center.Changed += (_, args) => change = args;
+
+        center.Add(new ShellNotification("1", "app", "Aplicación", "Título", "Cuerpo", DateTimeOffset.UtcNow), showPopup: false);
+
+        var notification = Assert.Single(center.GetActive());
+        Assert.Equal("Aplicación", notification.AppName);
+        Assert.NotNull(change);
+        Assert.True(change!.Added);
+        Assert.False(change.ShowPopup);
+    }
+
+    [Fact]
+    public void NotificationCenterLimitsHistoryAndDropsOversizedIcons()
+    {
+        var center = new NotificationCenter();
+        var normalized = new ShellNotification(
+            "oversized",
+            "app",
+            "Aplicación",
+            "Título",
+            "Cuerpo",
+            DateTimeOffset.UtcNow,
+            new byte[ShellNotification.MaximumIconBytes + 1]).Normalize();
+        Assert.Null(normalized.IconPng);
+
+        for (var index = 0; index <= NotificationCenter.MaximumHistoryItems; index++)
+        {
+            center.Add(new ShellNotification(
+                index.ToString(),
+                "app",
+                "Aplicación",
+                "Título",
+                "Cuerpo",
+                DateTimeOffset.UtcNow.AddSeconds(index)));
+        }
+
+        Assert.Equal(NotificationCenter.MaximumHistoryItems, center.GetActive().Count);
+        Assert.DoesNotContain(center.GetActive(), item => item.Id == "0");
+    }
+
+    [Fact]
+    public void SystemTrayAutoDismissSchedulesOnlyForPointerOpenedMenu()
+    {
+        var state = new SystemTrayAutoDismissState();
+
+        state.Open(openedFromPointer: true, pointerOverMenu: false);
+
+        Assert.True(state.IsEnabled);
+        Assert.True(state.IsTimerPending);
+        Assert.True(state.TimerElapsed(pointerOverMenu: false));
+
+        state.Open(openedFromPointer: false, pointerOverMenu: false);
+        Assert.False(state.IsEnabled);
+        Assert.False(state.IsTimerPending);
+    }
+
+    [Fact]
+    public void SystemTrayAutoDismissCancelsWhenPointerReturnsOrKeyboardIsUsed()
+    {
+        var state = new SystemTrayAutoDismissState();
+        state.Open(openedFromPointer: true, pointerOverMenu: false);
+
+        state.PointerEntered();
+        Assert.False(state.IsTimerPending);
+        state.PointerLeft();
+        Assert.True(state.IsTimerPending);
+        Assert.False(state.TimerElapsed(pointerOverMenu: true));
+
+        state.KeyboardInteraction();
+        state.PointerLeft();
+        Assert.False(state.IsTimerPending);
+        Assert.False(state.TimerElapsed(pointerOverMenu: false));
+    }
+
     [Theory]
     [InlineData("ES", "Español (Chile)", "short", "ES")]
     [InlineData("ES", "Español (Chile)", "full", "Español (Chile)")]
@@ -246,6 +343,7 @@ public sealed class PlaceholderTests
             Assert.Equal("yazi.exe", result.Configuration.FileManager.Command);
             Assert.True(result.Configuration.SystemTray.Enabled);
             Assert.Equal("Ctrl+Alt+T", result.Configuration.SystemTray.Hotkey);
+            Assert.False(result.Configuration.Notifications.Enabled);
         }
         finally
         {
@@ -312,6 +410,9 @@ public sealed class PlaceholderTests
                 title = "Teclado"
                 label_format = "full"
                 hotkey = "Ctrl+Alt+L"
+
+                [notifications]
+                enabled = true
                 """);
 
             var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
@@ -339,6 +440,7 @@ public sealed class PlaceholderTests
             Assert.Equal("Teclado", result.Configuration.InputLanguage.Title);
             Assert.Equal("full", result.Configuration.InputLanguage.LabelFormat);
             Assert.Equal("Ctrl+Alt+L", result.Configuration.InputLanguage.Hotkey);
+            Assert.True(result.Configuration.Notifications.Enabled);
         }
         finally
         {
@@ -365,6 +467,90 @@ public sealed class PlaceholderTests
             Assert.False(result.IsValid);
             Assert.Contains(result.Errors, error => error.Contains("input_language.title"));
             Assert.Contains(result.Errors, error => error.Contains("input_language.label_format"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void BenchmarkConfigurationLoadsAndValidatesRetention()
+    {
+        var directory = CreateTemporaryDirectory();
+        var path = Path.Combine(directory, "benchmark.toml");
+        try
+        {
+            File.WriteAllText(path, """
+                [benchmark]
+                enabled = true
+                capture_profile = "detailed"
+                sample_interval_seconds = 15
+                retention_days = 21
+                max_storage_mb = 512
+                """);
+
+            var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
+
+            Assert.True(result.IsValid, string.Join(Environment.NewLine, result.Errors));
+            Assert.True(result.Configuration.Benchmark.Enabled);
+            Assert.Equal(15, result.Configuration.Benchmark.SampleIntervalSeconds);
+            Assert.Equal(21, result.Configuration.Benchmark.RetentionDays);
+            Assert.Equal(512, result.Configuration.Benchmark.MaxStorageMb);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LiveBenchmarkRecorderWritesSessionEventsWhenEnabled()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var configuration = new BenchmarkConfiguration
+            {
+                Enabled = true,
+                SampleIntervalSeconds = 3600,
+                RetentionDays = 14,
+                MaxStorageMb = 16
+            };
+            using (var recorder = new LiveBenchmarkRecorder(configuration, new FileLogger(directory), Path.Combine(directory, "live")))
+            {
+                recorder.Start();
+                recorder.Record("test_event", new { value = 1 });
+
+                var file = Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl"));
+                var text = File.ReadAllText(file);
+                Assert.Contains("session_started", text, StringComparison.Ordinal);
+                Assert.Contains("test_event", text, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LiveBenchmarkRecorderDoesNotCreateTelemetryWhenDisabled()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var liveDirectory = Path.Combine(directory, "live");
+            using var recorder = new LiveBenchmarkRecorder(
+                new BenchmarkConfiguration { Enabled = false },
+                new FileLogger(directory),
+                liveDirectory);
+
+            recorder.Start();
+            recorder.Record("workspace_window_evaluated", new { handle = 10 });
+
+            Assert.False(recorder.IsEnabled);
+            Assert.False(Directory.Exists(liveDirectory));
         }
         finally
         {
@@ -576,6 +762,35 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
+    public void StatusPanelKeepsDockVisibleWhileAMenuIsActive()
+    {
+        var state = new StatusPanelVisibilityState();
+        state.ShowFromEdge();
+        state.SetMenuActive("system-tray", isActive: true);
+
+        Assert.True(state.HasActiveMenus);
+        Assert.False(state.HideWhenPointerLeaves(pointerInsidePanel: false));
+        Assert.True(state.IsVisible);
+
+        state.SetMenuActive("system-tray", isActive: false);
+        Assert.False(state.HasActiveMenus);
+        Assert.True(state.HideWhenPointerLeaves(pointerInsidePanel: false));
+    }
+
+    [Fact]
+    public void StatusPanelWorkspaceAnnouncementKeepsDockVisibleUntilItExpires()
+    {
+        var state = new StatusPanelVisibilityState();
+        var start = new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.Zero);
+        state.ShowWorkspaceAnnouncement(start, TimeSpan.FromSeconds(1.5));
+
+        Assert.True(state.IsVisible);
+        Assert.True(state.HasActiveWorkspaceAnnouncement(start.AddSeconds(1)));
+        Assert.False(state.HideWhenPointerLeaves(pointerInsidePanel: false, start.AddSeconds(1)));
+        Assert.True(state.HideWhenPointerLeaves(pointerInsidePanel: false, start.AddSeconds(2)));
+    }
+
+    [Fact]
     public void StatusPanelHotkeyKeepsPanelVisibleUntilToggledAgain()
     {
         var state = new StatusPanelVisibilityState();
@@ -586,6 +801,32 @@ public sealed class PlaceholderTests
         Assert.False(state.HideWhenPointerLeaves(pointerInsidePanel: false));
         Assert.False(state.ToggleByHotkey());
         Assert.False(state.IsVisible);
+    }
+
+    [Fact]
+    public void StatusPanelMenuRetentionDoesNotChangeHotkeyPinning()
+    {
+        var state = new StatusPanelVisibilityState();
+
+        state.ToggleByHotkey();
+        state.SetMenuActive("system-tray", isActive: true);
+        state.SetMenuActive("system-tray", isActive: false);
+
+        Assert.True(state.IsPinnedByHotkey);
+        Assert.False(state.HideWhenPointerLeaves(pointerInsidePanel: false));
+    }
+
+    [Fact]
+    public void StatusPanelWorkspaceAnnouncementPreservesHotkeyPinning()
+    {
+        var state = new StatusPanelVisibilityState();
+        var start = new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.Zero);
+
+        state.ToggleByHotkey();
+        state.ShowWorkspaceAnnouncement(start, TimeSpan.FromSeconds(1.5));
+
+        Assert.True(state.IsPinnedByHotkey);
+        Assert.False(state.HideWhenPointerLeaves(pointerInsidePanel: false, start.AddSeconds(2)));
     }
 
     [Fact]

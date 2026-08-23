@@ -1,6 +1,6 @@
 namespace TenchyShell.Core.Windows;
 
-public sealed record WindowSwitcherItem(IntPtr Handle, string Title);
+public sealed record WindowSwitcherItem(IntPtr Handle, string Title, bool FocusRestricted = false);
 
 public sealed class WindowSwitcherState
 {

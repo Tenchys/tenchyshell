@@ -35,7 +35,31 @@ public sealed class ShellConfiguration
 
     public WallpaperConfiguration Wallpaper { get; init; } = new();
 
+    public BenchmarkConfiguration Benchmark { get; init; } = new();
+
+    public NotificationConfiguration Notifications { get; init; } = new();
+
     public static ShellConfiguration CreateDefault() => new();
+}
+
+public sealed class BenchmarkConfiguration
+{
+    public bool Enabled { get; init; }
+
+    /// <summary>Actualmente solo se admite "detailed".</summary>
+    public string CaptureProfile { get; init; } = "detailed";
+
+    public int SampleIntervalSeconds { get; init; } = 10;
+
+    public int RetentionDays { get; init; } = 14;
+
+    public int MaxStorageMb { get; init; } = 256;
+}
+
+public sealed class NotificationConfiguration
+{
+    /// <summary>Requiere el bridge MSIX opcional y autorización del usuario.</summary>
+    public bool Enabled { get; init; }
 }
 
 public sealed class TerminalConfiguration
@@ -100,7 +124,7 @@ public sealed class WindowSwitcherConfiguration
 {
     public bool Enabled { get; init; } = true;
 
-    public string Hotkey { get; init; } = "Ctrl+Alt+Tab";
+    public string Hotkey { get; init; } = "Alt+Tab";
 
     public int Width { get; init; } = 680;
 

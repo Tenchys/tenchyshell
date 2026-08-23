@@ -110,6 +110,28 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
+    public void FocusRestrictionCacheRemembersOnlyAccessDeniedAndMarksTheSameWindow()
+    {
+        var cache = new WindowFocusRestrictionCache();
+        cache.Remember((IntPtr)101, "Administrador de tareas", WorkspaceFocusFailure.WindowsRejected);
+        cache.Remember((IntPtr)202, "Administrador de tareas", WorkspaceFocusFailure.AccessDenied);
+
+        Assert.False(cache.IsRestricted((IntPtr)101, "Administrador de tareas"));
+        Assert.True(cache.IsRestricted((IntPtr)202, "Administrador de tareas"));
+    }
+
+    [Fact]
+    public void FocusRestrictionCacheDropsAnAbsentOrReusedWindowHandle()
+    {
+        var cache = new WindowFocusRestrictionCache();
+        cache.Remember((IntPtr)202, "Administrador de tareas", WorkspaceFocusFailure.AccessDenied);
+
+        cache.Reconcile(new[] { new WindowSwitcherItem((IntPtr)202, "Otra ventana") });
+
+        Assert.False(cache.IsRestricted((IntPtr)202, "Otra ventana"));
+    }
+
+    [Fact]
     public void HotkeyParserRejectsMissingModifier()
     {
         var parsed = HotkeyParser.TryParse("Space", out _, out var error);
@@ -358,10 +380,10 @@ public sealed class PlaceholderTests
             (visible ? ShownWindows : HiddenWindows).Add(windowHandle);
         }
 
-        public bool Focus(IntPtr windowHandle)
+        public WorkspaceFocusResult Focus(IntPtr windowHandle)
         {
             LastFocusedWindow = windowHandle;
-            return true;
+            return WorkspaceFocusResult.Success();
         }
     }
 
