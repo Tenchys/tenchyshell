@@ -82,9 +82,9 @@ Describe "Install-TenchyShell.ps1" {
         Mock Invoke-WebRequest {
             param($Uri, $OutFile)
             if ($Uri.AbsoluteUri.EndsWith(".sha256")) {
-                Set-Content -LiteralPath $OutFile -Value $hash -NoNewline
+                Set-Content -LiteralPath $OutFile -Value $hash -NoNewline -WhatIf:$false
             } else {
-                Copy-Item -LiteralPath $archive -Destination $OutFile
+                Copy-Item -LiteralPath $archive -Destination $OutFile -WhatIf:$false
             }
         }
 
@@ -95,22 +95,24 @@ Describe "Install-TenchyShell.ps1" {
 
     It "validates a release tag in WhatIf without installing it" {
         $archive = Join-Path $release "release.zip"
+        $whatIfInstallDirectory = Join-Path $TestDrive "what-if-installed"
+        $whatIfUserConfig = Join-Path $TestDrive ".config\tenchyshell\what-if-config.toml"
         Compress-Archive -Path (Join-Path $release "*") -DestinationPath $archive
         $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
 
         Mock Invoke-WebRequest {
             param($Uri, $OutFile)
             if ($Uri.AbsoluteUri.EndsWith(".sha256")) {
-                Set-Content -LiteralPath $OutFile -Value $hash -NoNewline
+                Set-Content -LiteralPath $OutFile -Value $hash -NoNewline -WhatIf:$false
             } else {
-                Copy-Item -LiteralPath $archive -Destination $OutFile
+                Copy-Item -LiteralPath $archive -Destination $OutFile -WhatIf:$false
             }
         }
 
-        & $installer -ReleaseTag "v0.7.12.1" -Repository "Tenchys/tenchyshell" -SkipDependencies -WhatIf -InstallDirectory $installDirectory -UserConfigPath $userConfig
+        & $installer -ReleaseTag "v0.7.12.2" -Repository "Tenchys/tenchyshell" -SkipDependencies -WhatIf -InstallDirectory $whatIfInstallDirectory -UserConfigPath $whatIfUserConfig
 
-        Test-Path -LiteralPath $installDirectory | Should -BeFalse
-        Test-Path -LiteralPath $userConfig | Should -BeFalse
+        Test-Path -LiteralPath $whatIfInstallDirectory | Should -BeFalse
+        Test-Path -LiteralPath $whatIfUserConfig | Should -BeFalse
     }
 
     It "preserves an existing configuration and example script" {
