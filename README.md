@@ -21,7 +21,16 @@ consultas de red del dock se ejecutan fuera del message loop.
 
 ## Instalación
 
-TenchyShell todavía no incluye un instalador MSI. La instalación consiste en generar o descargar una publicación `win-x64` y conservar todos sus archivos en una carpeta estable.
+Cada tag `vX.Y.Z` genera un GitHub Release `win-x64` auto-contenido: no requiere instalar el SDK ni el runtime de .NET. Descarga el ZIP, su archivo `.sha256` y el bootstrapper; después valida e instala desde PowerShell:
+
+```powershell
+$hash = Get-Content .\TenchyShell-vX.Y.Z-win-x64.zip.sha256
+.\Install-TenchyShell.ps1 -ArchivePath .\TenchyShell-vX.Y.Z-win-x64.zip -ExpectedSha256 $hash
+```
+
+El bootstrapper instala TenchyShell en `%LOCALAPPDATA%\TenchyShell\app`, detecta WezTerm y Yazi e instala los paquetes oficiales de WinGet cuando faltan. Usa `-SkipDependencies` si ya los gestionas manualmente y `-WhatIf` para revisar las operaciones sin escribir ni instalar. Requiere WinGet y red solo para las dependencias faltantes.
+
+La instalación nunca instala un navegador: el perfil inicial usa `msedge.exe`, que puedes cambiar en el TOML.
 
 ### Desde el código fuente
 
@@ -52,10 +61,10 @@ Puedes copiar esa carpeta, por ejemplo, a:
 Desde la carpeta publicada:
 
 ```powershell
-dotnet TenchyShell.dll TenchyShell.example.toml
+.\TenchyShell.exe TenchyShell.example.toml
 ```
 
-La publicación actual es dependiente del runtime: necesita tener instalado el runtime de .NET 10. Para desarrollo, el SDK de .NET 10 ya incluye lo necesario.
+La publicación de release es auto-contenida. Para desarrollo, el SDK de .NET 10 sigue siendo necesario.
 
 No uses `--without-explorer` en la sesión principal. Ese modo debe probarse únicamente en una VM o usuario secundario.
 
@@ -72,6 +81,9 @@ dotnet build TenchyShell.slnx
 
 # Ejecutar las pruebas
 dotnet test TenchyShell.slnx
+
+# Ejecutar las pruebas aisladas del bootstrapper (requiere Pester 5 o posterior)
+.\scripts\test-installer.ps1
 
 # Ejecutar la aplicación mínima
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj
@@ -109,11 +121,13 @@ La compilación debe finalizar sin advertencias ni errores. Las pruebas no deben
 
 ## Configuración TOML y ubicación predeterminada
 
-La aplicación no carga automáticamente un archivo TOML si se inicia sin argumentos: en ese caso usa los valores incorporados en el código. Para una instalación publicada, la ubicación recomendada del archivo de configuración es junto al ejecutable:
+Tras la instalación, la aplicación carga automáticamente la configuración del usuario si se inicia sin argumentos:
 
 ```text
-%LOCALAPPDATA%\TenchyShell\TenchyShell.example.toml
+%USERPROFILE%\.config\tenchyshell\config.toml
 ```
+
+El instalador crea ese archivo solo si no existe; nunca sobrescribe una configuración existente. También deja los scripts de ejemplo bajo `.config\tenchyshell\scripts` sin reemplazar archivos que ya existan. Una ruta TOML pasada como argumento tiene prioridad. Si no hay archivo en la ruta predeterminada, la aplicación usa los valores incorporados.
 
 En una publicación generada desde este repositorio, el archivo se copia automáticamente a:
 
@@ -124,7 +138,7 @@ publish\TenchyShell\Release\win-x64\TenchyShell.example.toml
 El archivo `TenchyShell.without-explorer.example.toml` es el perfil de prueba sin Explorer. TenchyShell acepta cualquier ruta TOML como primer argumento:
 
 ```powershell
-dotnet TenchyShell.dll C:\ruta\TenchyShell.toml
+.\TenchyShell.exe C:\ruta\TenchyShell.toml
 ```
 
 Si no se proporciona una ruta, la aplicación usa los valores incorporados en el código; no modifica ni crea archivos TOML automáticamente. Los comentarios de los archivos de ejemplo describen cada opción, incluidas hotkeys, terminal, panel, zonas y tamaño proporcional de los números del overlay.
@@ -248,7 +262,7 @@ Para validar o publicar el MVP 0.7:
 ```powershell
 dotnet test TenchyShell.slnx
 .\scripts\publish.ps1 -Configuration Release
-dotnet publish\TenchyShell\Release\win-x64\TenchyShell.dll --check publish\TenchyShell\Release\win-x64\TenchyShell.example.toml
+.\publish\TenchyShell\Release\win-x64\TenchyShell.exe --check .\publish\TenchyShell\Release\win-x64\TenchyShell.example.toml
 ```
 
 ## Panel informativo

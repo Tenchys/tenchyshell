@@ -12,11 +12,15 @@ $output = Join-Path $repoRoot "publish\TenchyShell\$Configuration\win-x64"
 dotnet publish $project `
     --configuration $Configuration `
     --runtime win-x64 `
-    --self-contained false `
+    --self-contained true `
+    -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
     --output $output
 
 Copy-Item (Join-Path $repoRoot "config\TenchyShell.example.toml") (Join-Path $output "TenchyShell.example.toml") -Force
 Copy-Item (Join-Path $repoRoot "config\TenchyShell.without-explorer.example.toml") (Join-Path $output "TenchyShell.without-explorer.example.toml") -Force
+New-Item -ItemType Directory -Path (Join-Path $output "scripts") -Force | Out-Null
+Copy-Item (Join-Path $repoRoot "scripts\mouse-battery.example.ps1") (Join-Path $output "scripts\mouse-battery.example.ps1") -Force
 
 $gitCommit = $null
 $gitDirty = $null

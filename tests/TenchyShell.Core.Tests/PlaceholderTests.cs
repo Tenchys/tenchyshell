@@ -254,6 +254,18 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
+    public void ConfigurationPathResolverUsesUserConfigDirectoryAndKeepsExplicitPath()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "TenchyShell.Tests", Guid.NewGuid().ToString("N"));
+        var expected = Path.Combine(profile, ".config", "tenchyshell", "config.toml");
+
+        Assert.Equal(expected, ConfigurationPathResolver.GetDefaultPath(profile));
+        Assert.Equal("custom.toml", ConfigurationPathResolver.Resolve("custom.toml", expected, _ => false));
+        Assert.Equal(expected, ConfigurationPathResolver.Resolve(null, expected, path => path == expected));
+        Assert.Null(ConfigurationPathResolver.Resolve(null, expected, _ => false));
+    }
+
+    [Fact]
     public void ValidTomlLoadsConfiguredValues()
     {
         var directory = CreateTemporaryDirectory();

@@ -15,7 +15,7 @@ enabled = true
 command = ""
 
 [applications]
-browser = "brave.exe"
+browser = "msedge.exe"
 
 [status_panel]
 enabled = true

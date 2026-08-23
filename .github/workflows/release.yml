@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet restore TenchyShell.slnx
+      - run: dotnet build TenchyShell.slnx --configuration Release --no-restore
+      - run: dotnet test TenchyShell.slnx --configuration Release --no-build
+      - shell: pwsh
+        run: |
+          Install-Module Pester -MinimumVersion 5.0.0 -Force -Scope CurrentUser
+          .\\scripts\\test-installer.ps1
+      - shell: pwsh
+        run: .\\scripts\\publish.ps1 -Configuration Release
+      - shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $source = "publish\\TenchyShell\\Release\\win-x64"
+          $archive = "TenchyShell-$tag-win-x64.zip"
+          Compress-Archive -Path "$source\\*" -DestinationPath $archive
+          (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content "$archive.sha256" -NoNewline
+          $checksum = Get-Content "$archive.sha256" -Raw
+          .\\scripts\\Install-TenchyShell.ps1 `
+            -ArchivePath $archive `
+            -ExpectedSha256 $checksum `
+            -SkipDependencies `
+            -InstallDirectory (Join-Path $env:RUNNER_TEMP "TenchyShell-install-check") `
+            -UserConfigPath (Join-Path $env:RUNNER_TEMP "TenchyShell-config-check.toml") `
+            -WhatIf
+      - shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag "TenchyShell-$tag-win-x64.zip" "TenchyShell-$tag-win-x64.zip.sha256" "scripts/Install-TenchyShell.ps1" --generate-notes

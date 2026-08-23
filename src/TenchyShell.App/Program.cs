@@ -38,7 +38,7 @@ internal static class Program
             return 1;
         }
 
-        var configurationPath = GetConfigurationPath(args);
+        var configurationPath = ConfigurationPathResolver.Resolve(GetConfigurationPath(args));
         var result = new TomlConfigurationProvider(logger).Load(configurationPath);
 
         if (!result.IsValid)

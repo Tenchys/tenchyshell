@@ -7,6 +7,7 @@ Ejecutar estas pruebas en Windows 11 Pro. Antes de comenzar, confirmar que `wezt
 ```powershell
 dotnet build TenchyShell.slnx
 dotnet test TenchyShell.slnx
+.\scripts\test-installer.ps1
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- config/TenchyShell.example.toml
 ```
 
@@ -30,6 +31,16 @@ Para generar artefactos reproducibles:
 ```
 
 Verificar que existan `publish/TenchyShell/Debug/win-x64/TenchyShell.dll`, `publish/TenchyShell/Release/win-x64/TenchyShell.dll` y ambos archivos TOML de ejemplo. Probar cada publicación con `--check` antes de iniciar el perfil normal.
+
+## Hito 0.7.7 — Release instalable
+
+- [ ] Con el árbol limpio, ejecutar `dotnet test TenchyShell.slnx`, `./scripts/test-installer.ps1` y `./scripts/publish.ps1 -Configuration Release`.
+- [ ] Crear el tag temporal `v0.7.7-test.1` y confirmar en GitHub Actions build Release, pruebas .NET, Pester, ZIP, checksum y GitHub Release.
+- [ ] Descargar ZIP, `.sha256` y `Install-TenchyShell.ps1`; comprobar el checksum e instalar en una carpeta de prueba con el bootstrapper.
+- [ ] Ejecutar `TenchyShell.exe --check` desde la instalación. Confirmar que WezTerm y Yazi se detectan o se instalan mediante WinGet.
+- [ ] Cambiar el navegador en `%USERPROFILE%\.config\tenchyshell\config.toml`, reinstalar y confirmar que el TOML y scripts existentes se conservan.
+- [ ] En un usuario secundario o VM, ejecutar el perfil publicado con `--without-explorer`, recuperar Explorer con `Ctrl+Alt+Shift+E` y confirmar que Winlogon no cambia.
+- [ ] Conservar URL de CI, checksum, salida de `--check` y resultados de la sesión aislada antes de eliminar el release y tag temporales.
 
 ## Consolidación y rendimiento — Hito 0.7.6
 
@@ -89,6 +100,7 @@ dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-exp
 ```
 
 - [ ] Escribir `DETENER` y confirmar que Explorer se cierra tras registrar el hotkey de recuperación.
+- [ ] Confirmar que el modo no cambia Winlogon ni mata automáticamente una nueva instancia de Explorer iniciada por Windows; la recuperación sigue siendo manual mediante el hotkey.
 - [ ] Probar launcher, terminal, Yazi, navegador y cierre de ventana.
 - [ ] Pulsar `Ctrl+Alt+Shift+E` y comprobar que Explorer vuelve a iniciarse.
 - [ ] Pulsar `Ctrl+Alt+T`; confirmar que no inicia Explorer, muestra la bandeja propia y se cierra con `Escape`.
