@@ -36,13 +36,26 @@ try {
             throw "-ExpectedSha256 debe contener el SHA-256 de 64 caracteres publicado junto al release."
         }
 
-        $actualHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash
+        # Get-FileHash respeta $WhatIfPreference en Windows PowerShell y no
+        # devuelve un hash cuando el instalador se invoca con -WhatIf. La
+        # comprobación es estrictamente de lectura, por lo que debe ejecutarse
+        # antes de simular las operaciones que sí modifican el sistema.
+        $previousWhatIfPreference = $WhatIfPreference
+        try {
+            $WhatIfPreference = $false
+            $actualHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash
+        }
+        finally {
+            $WhatIfPreference = $previousWhatIfPreference
+        }
         if (-not [string]::Equals($actualHash, $ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)) {
             throw "El checksum del ZIP no coincide; la instalación fue cancelada."
         }
 
         $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("TenchyShell.Install." + [Guid]::NewGuid().ToString("N"))
-        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $temporaryDirectory
+        # La extracción temporal valida el contenido del ZIP aun en modo
+        # simulación; finally la elimina siempre sin dejar residuos.
+        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $temporaryDirectory -WhatIf:$false
         $SourceDirectory = $temporaryDirectory
     }
 
