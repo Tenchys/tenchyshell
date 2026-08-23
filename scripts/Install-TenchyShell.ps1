@@ -41,7 +41,9 @@ try {
         }
 
         $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("TenchyShell.Install." + [Guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Path $temporaryDirectory -Force | Out-Null
+        # La descarga y validación se realizan también con -WhatIf; el temporal
+        # es interno, se elimina en finally y no representa una instalación.
+        New-Item -ItemType Directory -Path $temporaryDirectory -Force -WhatIf:$false | Out-Null
         $assetBaseName = "TenchyShell-$ReleaseTag-win-x64"
         $releaseBaseUri = "https://github.com/$Repository/releases/download/$ReleaseTag"
         $ArchivePath = Join-Path $temporaryDirectory "$assetBaseName.zip"

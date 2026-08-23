@@ -93,6 +93,26 @@ Describe "Install-TenchyShell.ps1" {
         Test-Path -LiteralPath (Join-Path $installDirectory "TenchyShell.exe") | Should -BeTrue
     }
 
+    It "validates a release tag in WhatIf without installing it" {
+        $archive = Join-Path $release "release.zip"
+        Compress-Archive -Path (Join-Path $release "*") -DestinationPath $archive
+        $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+
+        Mock Invoke-WebRequest {
+            param($Uri, $OutFile)
+            if ($Uri.AbsoluteUri.EndsWith(".sha256")) {
+                Set-Content -LiteralPath $OutFile -Value $hash -NoNewline
+            } else {
+                Copy-Item -LiteralPath $archive -Destination $OutFile
+            }
+        }
+
+        & $installer -ReleaseTag "v0.7.12.1" -Repository "Tenchys/tenchyshell" -SkipDependencies -WhatIf -InstallDirectory $installDirectory -UserConfigPath $userConfig
+
+        Test-Path -LiteralPath $installDirectory | Should -BeFalse
+        Test-Path -LiteralPath $userConfig | Should -BeFalse
+    }
+
     It "preserves an existing configuration and example script" {
         $userScripts = Join-Path (Split-Path -Parent $userConfig) "scripts"
         New-Item -ItemType Directory -Path $userScripts -Force | Out-Null
