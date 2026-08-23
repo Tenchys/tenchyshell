@@ -58,15 +58,16 @@ public sealed class ExplorerShellControllerTests
     }
 
     [Fact]
-    public void TryExitCurrentSessionRejectsMissingTrayWindow()
+    public void TryExitCurrentSessionAcceptsAnAlreadyAbsentShellTray()
     {
         var platform = new FakePlatform([42]) { TrayWindow = IntPtr.Zero };
         var controller = new ExplorerShellController(platform);
 
         var result = controller.TryExitCurrentSession(Millisecond, Millisecond, Millisecond);
 
-        Assert.False(result.Succeeded);
-        Assert.Contains("Shell_TrayWnd", result.Message, StringComparison.Ordinal);
+        Assert.True(result.Succeeded);
+        Assert.Equal(42, result.ProcessId);
+        Assert.Contains("ya estaba ausente", result.Message, StringComparison.Ordinal);
         Assert.Equal(0, platform.PostCount);
     }
 

@@ -41,6 +41,16 @@ public sealed class ExplorerShellController
 
         var sessionId = platform.CurrentSessionId;
         var initialProcesses = platform.GetExplorerProcessIds(sessionId);
+        var trayWindow = platform.FindShellTrayWindow();
+        if (trayWindow == IntPtr.Zero)
+        {
+            int? residualProcessId = initialProcesses.Count == 1 ? initialProcesses[0] : null;
+            return new ExplorerShellExitResult(
+                true,
+                "Shell_TrayWnd ya estaba ausente; Explorer no actuaba como shell y no se solicitó ninguna salida.",
+                residualProcessId);
+        }
+
         if (initialProcesses.Count != 1)
         {
             return new ExplorerShellExitResult(
@@ -49,15 +59,6 @@ public sealed class ExplorerShellController
         }
 
         var initialProcessId = initialProcesses[0];
-        var trayWindow = platform.FindShellTrayWindow();
-        if (trayWindow == IntPtr.Zero)
-        {
-            return new ExplorerShellExitResult(
-                false,
-                "No se encontró la ventana Shell_TrayWnd de Explorer.",
-                initialProcessId);
-        }
-
         var trayProcessId = platform.GetWindowProcessId(trayWindow);
         if (trayProcessId != initialProcessId)
         {
