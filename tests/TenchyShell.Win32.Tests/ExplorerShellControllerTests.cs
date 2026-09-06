@@ -1,4 +1,5 @@
 using TenchyShell.Win32;
+using TenchyShell.Core.Applications;
 using Xunit;
 
 namespace TenchyShell.Win32.Tests;
@@ -16,6 +17,88 @@ public sealed class ExplorerShellControllerTests
 
         Assert.True(decision.Include);
         Assert.Equal("alt_tab_representative", decision.Reason);
+    }
+
+    [Fact]
+    public void PackagedApplicationActivatorRejectsAnEntryWithoutAppUserModelId()
+    {
+        var application = new ApplicationEntry(
+            "Calculadora",
+            ApplicationActivationKind.ShellApplication,
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
+
+        var result = new WindowsPackagedApplicationActivator().Activate(application);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("AppUserModelId", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PackagedApplicationActivatorRunsNormalLaunchOnDedicatedMtaInProcessContext()
+    {
+        var platform = new FakeApplicationActivationPlatform(
+            new PackagedActivationAttempt(
+                0,
+                42,
+                "Activación aceptada por Windows.",
+                PackagedActivationDiagnosticStage.ActivateApplication));
+        var activator = new WindowsPackagedApplicationActivator(platform);
+        var application = new ApplicationEntry(
+            "Calculadora",
+            ApplicationActivationKind.ShellApplication,
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
+
+        var result = activator.Activate(application);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(42, result.ProcessId);
+        Assert.Equal(PackagedApplicationActivationContext.InProcess, platform.DedicatedMtaContext);
+        Assert.Equal(1, platform.DedicatedMtaCalls);
+    }
+
+    [Fact]
+    public void PackagedActivationDiagnosticUsesDedicatedMtaAndKeepsAumidOutOfFailureMessage()
+    {
+        const int hresult = unchecked((int)0x80040900);
+        var platform = new FakeApplicationActivationPlatform(PackagedActivationAttempt.Failure(
+            hresult,
+            "La activación fue rechazada.",
+            PackagedActivationDiagnosticStage.CoCreateInstance));
+        var activator = new WindowsPackagedApplicationActivator(platform);
+
+        var result = activator.Diagnose("Contoso.Private_123!App", PackagedApplicationActivationContext.LocalServer, "Stopped");
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(hresult, result.HResult);
+        Assert.Equal("0x80040900", result.HResultHex);
+        Assert.Equal(PackagedApplicationActivationContext.LocalServer, platform.DedicatedMtaContext);
+        Assert.Equal(PackagedActivationDiagnosticStage.CoCreateInstance, result.Stage);
+        Assert.Equal(1, platform.DedicatedMtaCalls);
+        Assert.DoesNotContain("Contoso.Private_123!App", result.Message, StringComparison.Ordinal);
+        Assert.True(result.FinishedAt >= result.StartedAt);
+    }
+
+    [Fact]
+    public void PackagedApplicationActivatorPreservesTimeoutHResultAndComStage()
+    {
+        var platform = new FakeApplicationActivationPlatform(PackagedActivationAttempt.Timeout(
+            "La activación COM no completó dentro de 5 s.",
+            PackagedActivationDiagnosticStage.ActivateApplication));
+        var activator = new WindowsPackagedApplicationActivator(platform);
+        var application = new ApplicationEntry(
+            "Calculadora",
+            ApplicationActivationKind.ShellApplication,
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
+
+        var result = activator.Activate(application);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.TimedOut);
+        Assert.Equal("0x800705B4", result.HResultHex);
+        Assert.Equal(PackagedActivationDiagnosticStage.ActivateApplication, result.Stage);
+        Assert.DoesNotContain(application.AppUserModelId!, result.Error!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -41,7 +124,18 @@ public sealed class ExplorerShellControllerTests
     }
 
     [Fact]
-    public void TryExitCurrentSessionRejectsAStableShellExitWithResidualExplorerProcess()
+    public void WorkspaceTrackingExcludesVisibleWindowsWithAnEmptyNativeTitle()
+    {
+        var window = CreateWorkspaceWindow(title: string.Empty);
+
+        var decision = WorkspaceWindowService.DecideWindowTracking(window, currentProcessId: 1);
+
+        Assert.False(decision.Include);
+        Assert.Equal("empty_title", decision.Reason);
+    }
+
+    [Fact]
+    public void TryExitCurrentSessionAllowsTenchyShellToContinueWithResidualExplorerProcess()
     {
         var platform = new FakePlatform([42]);
         platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, IntPtr.Zero);
@@ -53,6 +147,7 @@ public sealed class ExplorerShellControllerTests
             Millisecond);
 
         Assert.False(result.Succeeded);
+        Assert.True(result.CanContinueWithoutExplorer);
         Assert.Equal(42, result.ProcessId);
         Assert.Equal(ExplorerShellState.ResidualProcess, result.State);
         Assert.Contains("proceso residual", result.Message, StringComparison.Ordinal);
@@ -63,11 +158,12 @@ public sealed class ExplorerShellControllerTests
         IntPtr? owner = null,
         IntPtr? rootOwner = null,
         IntPtr? altTabRepresentative = null,
-        long extendedStyle = 0) => new(
+        long extendedStyle = 0,
+        string title = "Administrador de tareas") => new(
             Handle: (IntPtr)10,
             IsVisible: true,
             ProcessId: 2,
-            Title: "Administrador de tareas",
+            Title: title,
             ClassName: "TaskManagerWindow",
             Owner: owner ?? IntPtr.Zero,
             RootOwner: rootOwner ?? (IntPtr)10,
@@ -116,6 +212,7 @@ public sealed class ExplorerShellControllerTests
         var result = controller.TryExitCurrentSession(Millisecond, Millisecond, Millisecond);
 
         Assert.True(result.Succeeded);
+        Assert.True(result.CanContinueWithoutExplorer);
         Assert.Null(result.ProcessId);
         Assert.Equal(ExplorerShellState.Stopped, result.State);
         Assert.Contains("ya estaba ausente", result.Message, StringComparison.Ordinal);
@@ -131,6 +228,7 @@ public sealed class ExplorerShellControllerTests
         var result = controller.GetCurrentSessionState();
 
         Assert.False(result.Succeeded);
+        Assert.True(result.CanContinueWithoutExplorer);
         Assert.Equal(ExplorerShellState.ResidualProcess, result.State);
         Assert.Equal(42, result.ProcessId);
     }
@@ -242,6 +340,19 @@ public sealed class ExplorerShellControllerTests
         {
             Assert.Equal(Millisecond, duration);
             DelayCount++;
+        }
+    }
+
+    private sealed class FakeApplicationActivationPlatform(PackagedActivationAttempt result) : IApplicationActivationPlatform
+    {
+        public PackagedApplicationActivationContext? DedicatedMtaContext { get; private set; }
+        public int DedicatedMtaCalls { get; private set; }
+
+        public PackagedActivationAttempt ActivateApplicationOnDedicatedMta(string appUserModelId, string arguments, PackagedApplicationActivationContext context)
+        {
+            DedicatedMtaContext = context;
+            DedicatedMtaCalls++;
+            return result;
         }
     }
 }

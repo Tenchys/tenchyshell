@@ -11,7 +11,10 @@ public sealed class WindowSwitcherState
         ArgumentNullException.ThrowIfNull(items);
 
         this.items = items
-            .Where(item => item.Handle != IntPtr.Zero)
+            // Un HWND puede permanecer asociado a un workspace después de que la
+            // ventana se cierre o cambie de título. No debe convertirse en una
+            // entrada artificial de "Ventana sin título" en el selector.
+            .Where(item => item.Handle != IntPtr.Zero && !string.IsNullOrWhiteSpace(item.Title))
             .GroupBy(item => item.Handle)
             .Select(group => group.First())
             .ToArray();

@@ -1,4 +1,4 @@
-# Protocolo de rendimiento — TenchyShell MVP 0.7.6
+# Protocolo de rendimiento externo — TenchyShell MVP 0.8.7 (esquema 3)
 
 ## Propósito y alcance
 
@@ -12,10 +12,13 @@ Los datos crudos contienen usuario, máquina, procesos y hardware. Se guardan
 fuera del repositorio en:
 
 ```text
-%LOCALAPPDATA%\TenchyShell\benchmarks\v2\<batch-id>\
+%LOCALAPPDATA%\TenchyShell\benchmarks\v3\<batch-id>\
 ```
 
-El esquema 1 y los smoke tests no se pueden mezclar con un informe oficial.
+Las capturas v2 se conservan como evidencia histórica, pero son inválidas para
+la línea base 0.8.7. El resumidor puede abrirlas de forma explícita con
+`-SchemaVersion 2`; nunca mezcla lotes v2 y v3. Los smoke tests tampoco se
+pueden mezclar con un informe oficial.
 
 ## Entorno controlado
 
@@ -26,8 +29,9 @@ Winlogon ni detener Explorer en la sesión principal.
 Antes de comenzar:
 
 1. Trabajar desde un commit limpio y publicar una única compilación Release.
-2. Ejecutar `dotnet test TenchyShell.slnx` y comprobar la publicación con
-   `--check`.
+2. Ejecutar `dotnet test TenchyShell.slnx`, comprobar la publicación con
+   `--check`, ejecutar las pruebas sintéticas y superar los tres smoke tests
+   v3 antes de capturar el Día 0.
 3. Elegir un identificador de lote, por ejemplo `20260820-release-a`, y
    conservarlo para las cinco capturas.
 4. Cerrar navegador, sincronizadores y aplicaciones voluntarias; mantener
@@ -35,8 +39,8 @@ Antes de comenzar:
 5. Cerrar sesión y volver a entrar antes de cada captura. Preparar el escenario
    ejecutando el orquestador; este espera cinco minutos antes de iniciar el
    recolector.
-6. Ejecutar el recolector desde una consola diferente de WezTerm, porque esa
-   consola es carga observadora y no forma parte de la medición.
+6. Ejecutar el recolector desde una consola diferente de WezTerm. Su PID se
+   excluye de todos los agregados y su coste se publica como `observer`.
 
 El inicio de sesión permanece manual para no almacenar credenciales ni cambiar
 Winlogon. Desde ese momento toda la captura es automática: preparación,
@@ -50,19 +54,39 @@ resumidor rechaza entornos, ajustes, commits y lotes diferentes.
 
 ## Procesos, roles y métricas
 
-Cada proceso incluido tiene un rol explícito:
+El orquestador entrega un PID principal exacto: el proceso que acaba de iniciar
+para TenchyShell o el propietario Win32 de `Shell_TrayWnd` para Explorer. El
+recolector rechaza ese PID si está ausente, duplicado, finalizado, reutilizado,
+pertenece a otra sesión o su nombre no corresponde al escenario. Una segunda
+`TenchyShell.exe` nunca se confunde con el núcleo.
 
-- `Shell`: exactamente un `TenchyShell.exe` —se acepta `MinimalShell.exe` solo
-  como compatibilidad histórica— o exactamente un `explorer.exe`.
-- `Tool`: WezTerm, Yazi y descendientes de estas herramientas.
-- `Total`: suma de `Shell` y `Tool`.
+Cada proceso incluido tiene un rol explícito y cada muestra publica estos
+agregados:
+
+- `Core`: exclusivamente el PID principal.
+- `Auxiliary`: TUI, bridge, terminal de la TUI y demás descendientes iniciados
+  por el núcleo TenchyShell.
+- `ShellSession`: suma de `Core` y `Auxiliary`.
+- `Tool`: WezTerm/Yazi del workload y sus descendientes.
+- `Total`: suma de `ShellSession` y `Tool`.
+
+El PID PowerShell/CIM del recolector no puede aparecer en ninguno de esos
+agregados. Cada muestra registra aparte su CPU, memoria privada, working set y
+duración de muestreo; el informe contiene una sección `observer` que permite
+evaluar su perturbación.
+
+El hito 0.8.7 mantiene PowerShell/CIM. Un recolector Win32 solo se evaluará si
+varios lotes comparables muestran que el observador ocupa una fracción material
+del intervalo o altera repetidamente las métricas/P95; la mera existencia de
+carga observadora no justifica añadir esa complejidad.
 
 El recolector limita shells, herramientas y procesos externos al `SessionId`
 interactivo donde se ejecuta. Una sesión de otro usuario nunca se cierra ni se
 atribuye a la captura; aun así, para reducir carga global se debe cerrar la
 sesión principal antes de entrar al usuario secundario.
 
-No se atribuyen a Explorer sus hosts auxiliares ni descendientes arbitrarios.
+No se atribuyen a Explorer hosts genéricos de Windows ni descendientes
+arbitrarios; se conservan únicamente como contexto externo.
 Los navegadores se excluyen de los roles. Procesos externos se conservan como
 contexto; una aplicación no prevista que supere el 5 % de CPU durante diez
 segundos invalida la captura. DWM y los hosts conocidos de la shell de Windows
@@ -171,10 +195,12 @@ final informa cuál será la captura siguiente. Tras la quinta ejecución genera
 
 El modo interno `--automated-benchmark` solo es válido junto con
 `--without-explorer` y `--exit-after-seconds`; TenchyShell restaura Explorer en
-su bloque `finally`. El orquestador también mantiene una recuperación externa
+su bloque `finally`. Este modo suprime por completo `LiveBenchmarkRecorder`,
+aunque `[benchmark] enabled = true`, y el orquestador comprueba que no se cree
+ni amplíe ningún `live-*.jsonl`. Las sesiones normales conservan intacto el
+comportamiento opt-in de `[benchmark]`. El orquestador también mantiene una recuperación externa
 y marca la captura inválida si necesita forzar el cierre de su propio proceso.
-TenchyShell identifica `Shell_TrayWnd`, comprueba que pertenece al único
-`explorer.exe` de la sesión y solicita la misma salida cooperativa que ofrece la
+TenchyShell identifica `Shell_TrayWnd`, comprueba su PID propietario y solicita la misma salida cooperativa que ofrece la
 barra de tareas. No termina Explorer a la fuerza: exige que la superficie de
 shell permanezca ausente durante dos segundos. `explorer.exe` puede permanecer
 como proceso residual sin bandeja; la captura se cancela si Windows vuelve a
@@ -194,7 +220,7 @@ El informe también puede regenerarse explícitamente:
 
 ```powershell
 $benchmarkBatch = "20260820-release-a"
-$batchPath = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v2\$benchmarkBatch"
+$batchPath = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v3\$benchmarkBatch"
 .\scripts\summarize-performance.ps1 `
   -InputPath $batchPath `
   -OutputPath (Join-Path $batchPath "summary.md")
@@ -207,7 +233,8 @@ lote y orquestación automática completada.
 ## Pruebas del instrumental
 
 Las pruebas sintéticas validan cuartiles, deltas, denominador cero, matriz
-completa y rechazo de esquema antiguo, shell ausente/duplicada, captura
+completa, separación v2/v3, PID Core ausente/duplicado, clasificación de TUI,
+bridge, terminal y workload, sumas exactas, exclusión del observador, captura
 incompleta, menos de cinco repeticiones y entornos mezclados:
 
 ```powershell
@@ -221,18 +248,19 @@ parámetros individuales:
 
 ```powershell
 # Diagnóstico directo; el flujo normal usa invoke-performance-benchmark.ps1.
+$mainPid = (Get-Process TenchyShell | Sort-Object StartTime | Select-Object -First 1).Id
 .\scripts\measure-performance.ps1 -SmokeTest -Repetitions 1 `
-  -Scenario TenchyShell -Phase Idle -WarmupSeconds 0 `
+  -Scenario TenchyShell -Phase Idle -MainProcessId $mainPid -WarmupSeconds 0 `
   -SamplesPerRepetition 7 -InterRepetitionSeconds 0
 
 # Requiere comenzar sin WezTerm/Yazi.
 .\scripts\measure-performance.ps1 -SmokeTest -Repetitions 1 `
-  -Scenario TenchyShell -Phase CommonWorkflow -WarmupSeconds 0 `
+  -Scenario TenchyShell -Phase CommonWorkflow -MainProcessId $mainPid -WarmupSeconds 0 `
   -SamplesPerRepetition 7 -InterRepetitionSeconds 0 `
   -WorkflowLaunchSecond 1 -WorkflowCloseSecond 3 -WorkflowVerifyClosedSecond 5
 
 .\scripts\measure-performance.ps1 -SmokeTest -Repetitions 1 `
-  -Scenario TenchyShell -Phase TenchyShellStress -WarmupSeconds 0 `
+  -Scenario TenchyShell -Phase TenchyShellStress -MainProcessId $mainPid -WarmupSeconds 0 `
   -SamplesPerRepetition 7 -InterRepetitionSeconds 0 `
   -StressActionSeconds 1,2,3,4,5
 ```
@@ -246,6 +274,8 @@ Esta primera comparativa establece una línea base, no un presupuesto ni la
 obligación de superar a Explorer en todas las métricas. Se acepta cuando:
 
 - las cinco capturas superan todas las validaciones automáticas;
+- ningún agregado contiene el observador ni la telemetría interna, y el informe
+  muestra `Core`, `ShellSession` y la sección separada del observador;
 - no se requirió ninguna interacción durante cada captura;
 - no hay bloqueos ni regresiones funcionales;
 - el log confirma cierre limpio;

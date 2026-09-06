@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 
 namespace TenchyShell.Win32;
@@ -12,9 +11,11 @@ public sealed class MessageLoopHost : IDisposable
     private readonly Dictionary<int, HotkeyCombination> hotkeys = new();
     private readonly HashSet<int> requiredHotkeys = new();
     private readonly HashSet<int> registeredHotkeys = new();
-    private readonly ConcurrentQueue<Action> postedActions = new();
+    private readonly object postedActionsGate = new();
+    private readonly LinkedList<Action> postedActions = new();
     private IntPtr windowHandle;
     private ushort windowClassAtom;
+    private int messageLoopManagedThreadId;
     private bool isRunning;
     private bool isDisposed;
 
@@ -32,17 +33,27 @@ public sealed class MessageLoopHost : IDisposable
 
     public event Action<int, int>? HotkeyRegistrationFailed;
 
-    public void Post(Action action)
+    /// <summary>Indica si el código se está ejecutando en el hilo que posee la cola Win32.</summary>
+    public bool IsOnMessageLoopThread => isRunning && messageLoopManagedThreadId == Environment.CurrentManagedThreadId;
+
+    /// <summary>Encola trabajo en el hilo que posee la cola Win32.</summary>
+    public void Post(Action action) => TryPost(action);
+
+    /// <summary>Intenta encolar trabajo y permite al llamador registrar un fallo observable.</summary>
+    public bool TryPost(Action action)
     {
         ArgumentNullException.ThrowIfNull(action);
 
-        if (isDisposed || windowHandle == IntPtr.Zero)
+        lock (postedActionsGate)
         {
-            return;
-        }
+            if (isDisposed || windowHandle == IntPtr.Zero) return false;
 
-        postedActions.Enqueue(action);
-        NativeMethods.PostMessage(windowHandle, NativeMethods.WM_APP_EXECUTE, IntPtr.Zero, IntPtr.Zero);
+            var entry = postedActions.AddLast(action);
+            if (NativeMethods.PostMessage(windowHandle, NativeMethods.WM_APP_EXECUTE, IntPtr.Zero, IntPtr.Zero)) return true;
+
+            postedActions.Remove(entry);
+            return false;
+        }
     }
 
     public void ConfigureHotkey(int id, HotkeyCombination combination, bool required = false)
@@ -82,6 +93,7 @@ public sealed class MessageLoopHost : IDisposable
 
         CreateMessageWindow();
         isRunning = true;
+        messageLoopManagedThreadId = Environment.CurrentManagedThreadId;
 
         try
         {
@@ -109,6 +121,7 @@ public sealed class MessageLoopHost : IDisposable
         finally
         {
             isRunning = false;
+            messageLoopManagedThreadId = 0;
             ReleaseNativeResources();
         }
     }
@@ -215,7 +228,7 @@ public sealed class MessageLoopHost : IDisposable
     {
         if (message == NativeMethods.WM_APP_EXECUTE)
         {
-            while (postedActions.TryDequeue(out var action))
+            while (TryTakePostedAction(out var action))
             {
                 try
                 {
@@ -264,6 +277,8 @@ public sealed class MessageLoopHost : IDisposable
 
     private void ReleaseNativeResources()
     {
+        lock (postedActionsGate) postedActions.Clear();
+
         if (windowHandle != IntPtr.Zero)
         {
             foreach (var hotkeyId in registeredHotkeys)
@@ -280,6 +295,22 @@ public sealed class MessageLoopHost : IDisposable
         {
             NativeMethods.UnregisterClass(windowClassName, moduleHandle);
             windowClassAtom = 0;
+        }
+    }
+
+    private bool TryTakePostedAction(out Action action)
+    {
+        lock (postedActionsGate)
+        {
+            if (postedActions.First is null)
+            {
+                action = null!;
+                return false;
+            }
+
+            action = postedActions.First.Value;
+            postedActions.RemoveFirst();
+            return true;
         }
     }
 }

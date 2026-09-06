@@ -8,14 +8,36 @@ namespace TenchyShell.Win32;
 /// </summary>
 internal static class NativeMethods
 {
+    internal const uint COINIT_MULTITHREADED = 0x0;
+    internal const uint CLSCTX_INPROC_SERVER = 0x1;
+    internal const uint CLSCTX_LOCAL_SERVER = 0x4;
+    internal const int RPC_E_CHANGED_MODE = unchecked((int)0x80010106);
+
+    [DllImport("ole32.dll")]
+    internal static extern int CoInitializeEx(IntPtr reserved, uint coInit);
+
+    [DllImport("ole32.dll")]
+    internal static extern void CoUninitialize();
+
+    [DllImport("ole32.dll")]
+    internal static extern int CoCreateInstance(
+        ref Guid classId,
+        IntPtr outer,
+        uint classContext,
+        ref Guid interfaceId,
+        [MarshalAs(UnmanagedType.Interface)] out object? instance);
+
     internal const uint WM_CLOSE = 0x0010;
     internal const uint WM_DESTROY = 0x0002;
+    internal const uint WM_SETTINGCHANGE = 0x001A;
+    internal const uint WM_DISPLAYCHANGE = 0x007E;
     internal const uint WM_HOTKEY = 0x0312;
     internal const uint WM_PAINT = 0x000F;
     internal const uint WM_CHAR = 0x0102;
     internal const uint WM_KEYDOWN = 0x0100;
     internal const uint WM_ERASEBKGND = 0x0014;
     internal const uint WM_TIMER = 0x0113;
+    internal const uint WM_DPICHANGED = 0x02E0;
     internal const uint WM_NCHITTEST = 0x0084;
     internal const uint WM_MOUSEACTIVATE = 0x0021;
     internal const uint WM_APP_EXECUTE = 0x8001;
@@ -38,11 +60,23 @@ internal static class NativeMethods
     internal const uint MOD_WIN = 0x0008;
     internal const uint MOD_NOREPEAT = 0x4000;
     internal const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    internal const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
+    internal const uint EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    internal const uint EVENT_OBJECT_CREATE = 0x8000;
+    internal const uint EVENT_OBJECT_DESTROY = 0x8001;
+    internal const uint EVENT_OBJECT_SHOW = 0x8002;
+    internal const uint EVENT_OBJECT_HIDE = 0x8003;
+    internal const uint EVENT_OBJECT_NAMECHANGE = 0x800C;
+    internal const int OBJID_WINDOW = 0;
     internal const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    internal const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
     internal const int VK_BACK = 0x08;
     internal const int VK_RETURN = 0x0D;
     internal const int VK_ESCAPE = 0x1B;
+    internal const int VK_LEFT = 0x25;
+    internal const int VK_RIGHT = 0x27;
+    internal const int VK_SPACE = 0x20;
     internal const int VK_UP = 0x26;
     internal const int VK_DOWN = 0x28;
     internal const int VK_TAB = 0x09;
@@ -620,17 +654,22 @@ internal static class NativeMethods
 
     internal static string GetWindowTitle(IntPtr hWnd)
     {
+        var title = GetWindowTitleOrEmpty(hWnd);
+        return string.IsNullOrWhiteSpace(title)
+            ? "Ventana sin título"
+            : title;
+    }
+
+    /// <summary>Obtiene el título Win32 sin sustituir un valor vacío.</summary>
+    internal static string GetWindowTitleOrEmpty(IntPtr hWnd)
+    {
         var title = new StringBuilder(512);
-        return GetWindowText(hWnd, title, title.Capacity) > 0
-            ? title.ToString()
-            : "Ventana sin título";
+        return GetWindowText(hWnd, title, title.Capacity) > 0 ? title.ToString() : string.Empty;
     }
 
     internal static bool HasWindowTitle(IntPtr hWnd)
     {
-        var title = new StringBuilder(512);
-        return GetWindowText(hWnd, title, title.Capacity) > 0 &&
-               !string.IsNullOrWhiteSpace(title.ToString());
+        return !string.IsNullOrWhiteSpace(GetWindowTitleOrEmpty(hWnd));
     }
 
     internal static bool IsWindowCloaked(IntPtr hWnd)
@@ -665,6 +704,19 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")]
     internal static extern IntPtr CreateCompatibleDC(IntPtr deviceContext);
+
+    [DllImport("gdi32.dll")]
+    internal static extern IntPtr CreateCompatibleBitmap(IntPtr deviceContext, int width, int height);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern int ReleaseDC(IntPtr hWnd, IntPtr deviceContext);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool BitBlt(IntPtr destination, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint rasterOperation);
 
     [DllImport("gdi32.dll")]
     internal static extern IntPtr SelectObject(IntPtr deviceContext, IntPtr graphicsObject);

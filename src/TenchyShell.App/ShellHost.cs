@@ -8,11 +8,13 @@ using TenchyShell.Core.Network;
 using TenchyShell.Core.Notifications;
 using TenchyShell.Core.Layout;
 using TenchyShell.Core.Processes;
+using TenchyShell.Core.Session;
 using TenchyShell.Core.Windows;
 using TenchyShell.Core.SystemTray;
 using TenchyShell.Core.Wallpaper;
 using TenchyShell.Win32;
 using TenchyShell.Workspaces;
+using TenchyShell.Tui;
 
 namespace TenchyShell.App;
 
@@ -42,15 +44,23 @@ internal sealed class ShellHost : IDisposable
     private const int InputLanguageHotkeyId = 72;
 
     private readonly ShellConfiguration configuration;
+    private readonly OptionalComponentsSelection optionalComponents;
     private readonly ILogger logger;
     private readonly MessageLoopHost messageLoop;
     private readonly ShellActions actions;
-    private readonly WindowsApplicationCatalog applicationCatalog;
-    private readonly ProcessApplicationLauncher applicationLauncher;
-    private readonly LauncherWindow launcherWindow;
+    private readonly SessionActionService sessionActions;
+    private readonly SessionConfirmationStateMachine sessionConfirmation = new();
+    private readonly WindowsApplicationCatalog? applicationCatalog;
+    private readonly ProcessApplicationLauncher? applicationLauncher;
+    private readonly LauncherWindow? launcherWindow;
     private readonly IWindowService windowService;
     private readonly bool stopExplorerAfterHotkeys;
+    private readonly bool startTui;
+    private readonly string effectiveConfigurationPath;
     private readonly WorkspaceManager workspaceManager;
+    private readonly IWorkspaceWindowService workspaceWindowService;
+    private readonly IMinimizedWindowService? minimizedWindowService;
+    private readonly MinimizedWindowVisibilityService? minimizedWindowVisibilityService;
     private readonly StatusPanelWindow? statusPanelWindow;
     private readonly LayoutZoneCatalog layoutZoneCatalog;
     private readonly LayoutInteractionHost? layoutInteractionHost;
@@ -63,16 +73,32 @@ internal sealed class ShellHost : IDisposable
     private readonly ExplorerShellController explorerShellController;
     private readonly DesktopAreaPolicy desktopAreaPolicy;
     private readonly LiveBenchmarkRecorder benchmarkRecorder;
+    private readonly SessionStabilityMetrics stabilityMetrics;
     private readonly NotificationCenter notificationCenter;
     private readonly NotificationBridgeClient? notificationBridgeClient;
     private readonly NotificationWindow? notificationWindow;
+    private readonly WindowsApplicationCatalog? localApiApplicationCatalog;
+    private readonly LocalApiStateProvider? localApiStateProvider;
+    private readonly LocalApiServer? localApiServer;
+    private readonly LocalApiWindowChangeMonitor? localApiWindowMonitor;
+    private readonly LocalApiApplicationWatcher? localApiApplicationWatcher;
     private bool isDisposed;
 
-    public ShellHost(ShellConfiguration configuration, ILogger logger, bool stopExplorerAfterHotkeys = false)
+    public ShellHost(
+        ShellConfiguration configuration,
+        ILogger logger,
+        bool stopExplorerAfterHotkeys = false,
+        bool startTui = true,
+        string? effectiveConfigurationPath = null,
+        bool suppressLiveBenchmark = false)
     {
         this.configuration = configuration;
         this.logger = logger;
         this.stopExplorerAfterHotkeys = stopExplorerAfterHotkeys;
+        this.startTui = startTui;
+        this.effectiveConfigurationPath = effectiveConfigurationPath ?? configuration.ConfigurationPath;
+        optionalComponents = OptionalComponentsSelection.From(configuration);
+        LogOptionalComponentState();
 
         if (DpiAwareness.TryEnablePerMonitorV2(out var dpiError))
         {
@@ -84,18 +110,35 @@ internal sealed class ShellHost : IDisposable
         }
 
         messageLoop = new MessageLoopHost();
+        stabilityMetrics = new SessionStabilityMetrics();
         var processLauncher = new ProcessLauncher(logger);
         actions = new ShellActions(configuration, processLauncher, logger);
-        applicationCatalog = new WindowsApplicationCatalog();
-        applicationLauncher = new ProcessApplicationLauncher(processLauncher, logger);
-        launcherWindow = new LauncherWindow(applicationCatalog);
+        sessionActions = new SessionActionService(processLauncher, logger);
+        applicationCatalog = optionalComponents.ApplicationSearchEnabled
+            ? new WindowsApplicationCatalog()
+            : null;
+        applicationLauncher = optionalComponents.ApplicationSearchEnabled
+            ? new ProcessApplicationLauncher(
+                processLauncher,
+                new WindowsPackagedApplicationActivator(),
+                logger,
+                stabilityMetrics)
+            : null;
+        launcherWindow = optionalComponents.ApplicationSearchEnabled
+            ? new LauncherWindow(applicationCatalog!)
+            : null;
         desktopAreaPolicy = new DesktopAreaPolicy();
-        benchmarkRecorder = new LiveBenchmarkRecorder(configuration.Benchmark, logger);
+        benchmarkRecorder = new LiveBenchmarkRecorder(
+            configuration.Benchmark,
+            logger,
+            suppressed: suppressLiveBenchmark);
         notificationCenter = new NotificationCenter();
         notificationBridgeClient = configuration.Notifications.Enabled ? new NotificationBridgeClient(logger) : null;
-        notificationWindow = configuration.Notifications.Enabled
-            ? new NotificationWindow(notificationCenter, logger, messageLoop, desktopAreaPolicy)
-            : null;
+        notificationWindow = new NotificationWindow(notificationCenter, logger, messageLoop, desktopAreaPolicy);
+        if (applicationLauncher is not null)
+        {
+            applicationLauncher.PackagedApplicationActivationFailed += OnPackagedApplicationActivationFailed;
+        }
         if (notificationBridgeClient is not null)
         {
             notificationBridgeClient.NotificationReceived += OnNotificationReceived;
@@ -103,9 +146,39 @@ internal sealed class ShellHost : IDisposable
             notificationCenter.DismissRequested += notificationBridgeClient.Dismiss;
         }
         windowService = new WindowService(desktopAreaPolicy: desktopAreaPolicy);
-        workspaceManager = new WorkspaceManager(new WorkspaceWindowService(benchmarkRecorder));
-        statusPanelWindow = configuration.StatusPanel.Enabled
-            ? new StatusPanelWindow(configuration.StatusPanel, logger, desktopAreaPolicy)
+        workspaceWindowService = new WorkspaceWindowService(benchmarkRecorder);
+        workspaceManager = new WorkspaceManager(workspaceWindowService);
+        if (configuration.Api.Enabled)
+        {
+            localApiApplicationCatalog = new WindowsApplicationCatalog();
+            localApiStateProvider = new LocalApiStateProvider(
+                messageLoop,
+                workspaceManager,
+                workspaceWindowService,
+                localApiApplicationCatalog);
+            localApiServer = new LocalApiServer(localApiStateProvider, logger);
+            localApiWindowMonitor = new LocalApiWindowChangeMonitor(messageLoop, localApiStateProvider.RefreshWindows, logger);
+            localApiApplicationWatcher = new LocalApiApplicationWatcher(messageLoop, localApiStateProvider, logger);
+        }
+        else
+        {
+            logger.Info("API local deshabilitada; no se crearán Named Pipe, hooks ni watchers.");
+        }
+        statusPanelWindow = optionalComponents.DockEnabled
+            ? new StatusPanelWindow(configuration.StatusPanel, logger, desktopAreaPolicy, configuration.Dock)
+            : null;
+        minimizedWindowVisibilityService = optionalComponents.DockEnabled
+            ? new MinimizedWindowVisibilityService(
+                messageLoop,
+                workspaceManager,
+                workspaceWindowService,
+                logger)
+            : null;
+        minimizedWindowService = optionalComponents.DockEnabled
+            ? new MinimizedWindowService(
+                workspaceManager,
+                workspaceWindowService,
+                minimizedWindowVisibilityService)
             : null;
         layoutZoneCatalog = new LayoutZoneCatalog(configuration.Layout.Zones, configuration.Layout.MaxZones);
         layoutInteractionHost = configuration.Layout.Enabled
@@ -118,7 +191,7 @@ internal sealed class ShellHost : IDisposable
                 desktopAreaPolicy)
             : null;
         windowSwitcherWindow = configuration.WindowSwitcher.Enabled
-            ? new WindowSwitcherWindow(workspaceManager, new WorkspaceWindowService(benchmarkRecorder), configuration.WindowSwitcher, logger, benchmarkRecorder)
+            ? new WindowSwitcherWindow(workspaceManager, workspaceWindowService, configuration.WindowSwitcher, logger, benchmarkRecorder, stabilityMetrics)
             : null;
         windowSwitcherAltTabHook = configuration.WindowSwitcher.Enabled && IsAltTabHotkey(configuration.WindowSwitcher.Hotkey)
             ? new WindowSwitcherAltTabHook(messageLoop, windowSwitcherWindow!, logger)
@@ -138,14 +211,19 @@ internal sealed class ShellHost : IDisposable
             messageLoop,
             desktopAreaPolicy,
             benchmarkRecorder,
-            configuration.Notifications.Enabled ? notificationCenter : null);
+            configuration.Notifications.Enabled ? notificationCenter : null,
+            minimizedWindowService);
     }
 
     public ShellActions Actions => actions;
 
-    public int Run(int? exitAfterSeconds = null, bool showBenchmarkTestNotification = false)
+    public int Run(
+        int? exitAfterSeconds = null,
+        bool showBenchmarkTestNotification = false,
+        PackagedActivationDiagnosticOptions? packagedDiagnostic = null)
     {
         Timer? automaticStopTimer = null;
+        using var diagnosticCancellation = new CancellationTokenSource();
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
         Console.CancelKeyPress += OnCancelKeyPress;
@@ -153,11 +231,16 @@ internal sealed class ShellHost : IDisposable
         messageLoop.HotkeyPressed += OnHotkeyPressed;
         messageLoop.HotkeyRegistered += OnHotkeyRegistered;
         messageLoop.HotkeyRegistrationFailed += OnHotkeyRegistrationFailed;
-        launcherWindow.ApplicationSelected += OnApplicationSelected;
-        launcherWindow.CommandRequested += OnCommandRequested;
+        if (launcherWindow is not null)
+        {
+            launcherWindow.ApplicationSelected += OnApplicationSelected;
+            launcherWindow.CommandRequested += OnCommandRequested;
+        }
         if (statusPanelWindow is not null)
         {
             statusPanelWindow.TrayRequested += OpenSystemTrayFromPointer;
+            statusPanelWindow.DockItemRequested += OnDockItemRequested;
+            statusPanelWindow.Closed += CancelSessionConfirmation;
             systemTrayService.VisibilityChanged += OnSystemTrayVisibilityChanged;
         }
 
@@ -166,17 +249,26 @@ internal sealed class ShellHost : IDisposable
             ConfigureHotkeys();
             windowSwitcherAltTabHook?.Start();
             workspaceManager.Refresh();
+            if (localApiApplicationCatalog is WindowsApplicationCatalog apiCatalog)
+            {
+                apiCatalog.Refresh();
+            }
+            minimizedWindowVisibilityService?.Start();
             statusPanelWindow?.SetWorkspace(workspaceManager.CurrentWorkspace);
             statusPanelWindow?.Start();
-            applicationCatalog.Refresh();
+            if (applicationCatalog is not null)
+            {
+                applicationCatalog.Refresh();
+                logger.Info($"Catálogo de aplicaciones cargado: {applicationCatalog.GetAll().Count} entradas.");
+            }
             var monitors = new MonitorService().GetAll();
             logger.Info($"Monitores disponibles para layout: {monitors.Count}.");
-            logger.Info($"Catálogo de aplicaciones cargado: {applicationCatalog.GetAll().Count} entradas.");
             logger.Info($"TenchyShell iniciado. Terminal configurado: {configuration.Terminal.Command}.");
+            StartTuiIfConfigured();
             benchmarkRecorder.Start();
             notificationBridgeClient?.Start();
             if (configuration.Notifications.Enabled) NotificationBridgeLauncher.Start(logger);
-            if (configuration.Benchmark.Enabled)
+            if (benchmarkRecorder.IsEnabled)
             {
                 var message = $"Benchmark detallado activo. Los registros se guardan en '{benchmarkRecorder.DirectoryPath}' y pueden incluir títulos y comandos.";
                 logger.Info(message);
@@ -189,9 +281,44 @@ internal sealed class ShellHost : IDisposable
             Console.WriteLine($"Recuperación: {configuration.Hotkeys.Recovery} inicia explorer.exe.");
             return messageLoop.Run(() =>
             {
+                try
+                {
+                    localApiServer?.Start();
+                    localApiWindowMonitor?.Start();
+                    localApiApplicationWatcher?.Start();
+                }
+                catch (Exception exception)
+                {
+                    logger.Error("No se pudo iniciar completamente la API local; TenchyShell continuará sin esa integración.", exception);
+                }
+                if (exitAfterSeconds.HasValue)
+                {
+                    automaticStopTimer = new Timer(
+                        _ =>
+                        {
+                            diagnosticCancellation.Cancel();
+                            messageLoop.Stop();
+                        },
+                        null,
+                        TimeSpan.FromSeconds(exitAfterSeconds.Value),
+                        Timeout.InfiniteTimeSpan);
+                    logger.Info($"Cierre automático configurado en {exitAfterSeconds.Value} segundos.");
+                }
+
                 if (stopExplorerAfterHotkeys)
                 {
                     StopExplorerAfterHotkeys();
+                }
+
+                RunPackagedActivationDiagnostics(packagedDiagnostic, diagnosticCancellation.Token);
+                if (packagedDiagnostic is not null)
+                {
+                    // El límite de --exit-after-seconds sigue siendo la protección ante
+                    // una llamada COM que no regrese. Cuando la matriz sí termina, no
+                    // mantenemos la sesión artificialmente: permite detener una traza
+                    // ETW inmediatamente después de la última activación.
+                    messageLoop.Stop();
+                    return;
                 }
 
                 layoutInteractionHost?.Start();
@@ -199,15 +326,6 @@ internal sealed class ShellHost : IDisposable
                 if (showBenchmarkTestNotification)
                 {
                     ShowBenchmarkTestNotification();
-                }
-                if (exitAfterSeconds.HasValue)
-                {
-                    automaticStopTimer = new Timer(
-                        _ => messageLoop.Stop(),
-                        null,
-                        TimeSpan.FromSeconds(exitAfterSeconds.Value),
-                        Timeout.InfiniteTimeSpan);
-                    logger.Info($"Cierre automático configurado en {exitAfterSeconds.Value} segundos.");
                 }
             });
         }
@@ -223,11 +341,20 @@ internal sealed class ShellHost : IDisposable
             messageLoop.HotkeyPressed -= OnHotkeyPressed;
             messageLoop.HotkeyRegistered -= OnHotkeyRegistered;
             messageLoop.HotkeyRegistrationFailed -= OnHotkeyRegistrationFailed;
-            launcherWindow.ApplicationSelected -= OnApplicationSelected;
-            launcherWindow.CommandRequested -= OnCommandRequested;
+            if (launcherWindow is not null)
+            {
+                launcherWindow.ApplicationSelected -= OnApplicationSelected;
+                launcherWindow.CommandRequested -= OnCommandRequested;
+            }
+            if (applicationLauncher is not null)
+            {
+                applicationLauncher.PackagedApplicationActivationFailed -= OnPackagedApplicationActivationFailed;
+            }
             if (statusPanelWindow is not null)
             {
                 statusPanelWindow.TrayRequested -= OpenSystemTrayFromPointer;
+                statusPanelWindow.DockItemRequested -= OnDockItemRequested;
+                statusPanelWindow.Closed -= CancelSessionConfirmation;
                 systemTrayService.VisibilityChanged -= OnSystemTrayVisibilityChanged;
             }
             Console.CancelKeyPress -= OnCancelKeyPress;
@@ -245,6 +372,10 @@ internal sealed class ShellHost : IDisposable
         }
 
         layoutInteractionHost?.Dispose();
+        localApiServer?.Dispose();
+        localApiWindowMonitor?.Dispose();
+        localApiApplicationWatcher?.Dispose();
+        localApiStateProvider?.Dispose();
         if (notificationBridgeClient is not null)
         {
             notificationBridgeClient.NotificationReceived -= OnNotificationReceived;
@@ -254,13 +385,15 @@ internal sealed class ShellHost : IDisposable
         }
         notificationWindow?.Dispose();
         benchmarkRecorder.Dispose();
+        minimizedWindowVisibilityService?.Dispose();
         systemTrayService.Dispose();
         wallpaperService.Dispose();
         windowSwitcherAltTabHook?.Dispose();
         windowSwitcherWindow?.Dispose();
         statusPanelWindow?.Dispose();
         messageLoop.Dispose();
-        launcherWindow.Dispose();
+        launcherWindow?.Dispose();
+        logger.Info($"Resumen de estabilidad de sesión: {stabilityMetrics.Snapshot()}.");
         logger.Info("TenchyShell finalizado; se liberaron hotkeys y recursos Win32.");
         isDisposed = true;
         GC.SuppressFinalize(this);
@@ -332,7 +465,20 @@ internal sealed class ShellHost : IDisposable
 
         messageLoop.Post(() =>
         {
-            if (isDisposed || !state.HasSavedWallpaper)
+            if (isDisposed)
+            {
+                if (!string.IsNullOrWhiteSpace(state.Error)) logger.Error(state.Error);
+                return;
+            }
+
+            if (state.IsNoBackground)
+            {
+                var noBackgroundResult = wallpaperService.ApplyNoBackground();
+                if (!noBackgroundResult.Succeeded) logger.Error(noBackgroundResult.Error ?? "No se pudo restaurar el fondo negro.");
+                return;
+            }
+
+            if (!state.HasSavedWallpaper)
             {
                 if (!string.IsNullOrWhiteSpace(state.Error)) logger.Error(state.Error);
                 return;
@@ -360,13 +506,97 @@ internal sealed class ShellHost : IDisposable
     {
         logger.Info("El modo sin Explorer solicitará la salida cooperativa del shell tras registrar el hotkey de recuperación.");
         var result = explorerShellController.TryExitCurrentSession();
-        if (!result.Succeeded)
+        if (!result.CanContinueWithoutExplorer)
         {
             throw new InvalidOperationException(result.Message);
         }
 
-        logger.Info($"{result.Message} PID cerrado: {result.ProcessId}.");
+        logger.Info(result.State == ExplorerShellState.ResidualProcess
+            ? $"{result.Message} TenchyShell continuará; el proceso residual no se termina por la fuerza."
+            : result.Message);
+        stabilityMetrics.RecordExplorerTransition();
         desktopAreaPolicy.UseMonitorArea = true;
+    }
+
+    private void RunPackagedActivationDiagnostics(
+        PackagedActivationDiagnosticOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (options is null) return;
+
+        var runner = new WindowsPackagedApplicationActivator();
+        foreach (var appUserModelId in options.AppUserModelIds)
+        {
+            foreach (var context in options.Contexts)
+            {
+                if (cancellationToken.IsCancellationRequested) return;
+                var explorerState = explorerShellController.GetCurrentSessionState().State.ToString();
+                var result = runner.Diagnose(appUserModelId, context, explorerState);
+                ReportPackagedActivationDiagnostic(result);
+            }
+        }
+    }
+
+    private void ReportPackagedActivationDiagnostic(PackagedActivationDiagnosticResult result)
+    {
+        var consoleMessage = $"[DIAGNÓSTICO MSIX] AUMID='{result.AppUserModelId}' contexto={ToCommandLineContext(result.Context)} " +
+                             $"explorer={result.ExplorerShellState} resultado={(result.Succeeded ? "éxito" : "fallo")} " +
+                             $"pid={result.ProcessId?.ToString() ?? "desconocido"} etapa={result.Stage} HRESULT={result.HResultHex} " +
+                             $"inicio={result.StartedAt:O} fin={result.FinishedAt:O} mensaje={result.Message}";
+        Console.WriteLine(consoleMessage);
+
+        var logMessage = $"Diagnóstico de activación empaquetada: contexto={ToCommandLineContext(result.Context)}, " +
+                         $"explorer={result.ExplorerShellState}, resultado={(result.Succeeded ? "éxito" : "fallo")}, HRESULT={result.HResultHex}.";
+        if (result.Succeeded) logger.Info(logMessage);
+        else logger.Error(logMessage);
+    }
+
+    private static string ToCommandLineContext(PackagedApplicationActivationContext context) => context switch
+    {
+        PackagedApplicationActivationContext.InProcess => "in-process",
+        PackagedApplicationActivationContext.LocalServer => "local-server",
+        _ => context.ToString()
+    };
+
+    private void StartTuiIfConfigured()
+    {
+        if (!startTui)
+        {
+            logger.Info("Inicio automático de la TUI deshabilitado por --without-tui.");
+            return;
+        }
+        if (!configuration.Tui.Enabled)
+        {
+            logger.Info("Inicio automático de la TUI deshabilitado por configuración.");
+            return;
+        }
+
+        try
+        {
+            var target = TuiProcessTarget.FromCurrentProcess();
+            var path = string.IsNullOrWhiteSpace(effectiveConfigurationPath)
+                ? ConfigurationPathResolver.GetDefaultPath()
+                : effectiveConfigurationPath;
+            var request = new ProcessLaunchRequest(
+                configuration.Terminal.Command,
+                TuiTerminalCommandBuilder.BuildArguments(configuration.Terminal.Command, target, path));
+            var result = new ProcessLauncher(logger).Launch(request);
+            if (result.Succeeded)
+            {
+                logger.Info($"TUI iniciada dentro de '{configuration.Terminal.Command}' (PID: {result.ProcessId?.ToString() ?? "desconocido"}).");
+            }
+            else
+            {
+                var message = $"No se pudo iniciar la TUI dentro del terminal: {result.Error}";
+                logger.Error(message);
+                Console.Error.WriteLine(message);
+            }
+        }
+        catch (Exception exception)
+        {
+            logger.Error("No se pudo preparar el inicio automático de la TUI.", exception);
+            Console.Error.WriteLine($"No se pudo iniciar la TUI: {exception.Message}");
+        }
     }
 
     private void ConfigureHotkeys()
@@ -399,7 +629,7 @@ internal sealed class ShellHost : IDisposable
         ConfigureHotkey(WindowRestoreHotkeyId, "restaurar ventana", configuration.WindowHotkeys.Restore);
         ConfigureHotkey(WindowFocusHotkeyId, "enfocar ventana", configuration.WindowHotkeys.Focus);
 
-        if (configuration.StatusPanel.Enabled)
+        if (optionalComponents.DockEnabled)
         {
             ConfigureHotkey(StatusPanelHotkeyId, "panel informativo", configuration.StatusPanel.Hotkey);
         }
@@ -426,7 +656,7 @@ internal sealed class ShellHost : IDisposable
             ConfigureHotkey(InputLanguageHotkeyId, "selector de idioma", configuration.InputLanguage.Hotkey);
         }
 
-        if (configuration.Launcher.Enabled)
+        if (optionalComponents.ApplicationSearchEnabled)
         {
             ConfigureHotkey(LauncherHotkeyId, "launcher", configuration.Hotkeys.Launcher);
         }
@@ -486,9 +716,9 @@ internal sealed class ShellHost : IDisposable
             case RecoveryHotkeyId:
                 OnRecoveryRequested();
                 break;
-            case LauncherHotkeyId when configuration.Launcher.Enabled:
-                launcherWindow.Toggle();
-                logger.Info(launcherWindow.IsVisible ? "Launcher mostrado." : "Launcher ocultado.");
+            case LauncherHotkeyId when optionalComponents.ApplicationSearchEnabled:
+                launcherWindow?.Toggle();
+                logger.Info(launcherWindow?.IsVisible == true ? "Launcher mostrado." : "Launcher ocultado.");
                 break;
             case TerminalHotkeyId:
                 ReportLaunchFailure("terminal", actions.LaunchTerminal());
@@ -535,7 +765,7 @@ internal sealed class ShellHost : IDisposable
             case WindowFocusHotkeyId:
                 FocusActiveWindowWithBenchmark();
                 break;
-            case StatusPanelHotkeyId when configuration.StatusPanel.Enabled:
+            case StatusPanelHotkeyId when optionalComponents.DockEnabled:
                 statusPanelWindow?.ToggleByHotkey();
                 logger.Info(statusPanelWindow?.IsVisible == true
                     ? "Panel informativo mostrado mediante hotkey."
@@ -628,6 +858,8 @@ internal sealed class ShellHost : IDisposable
         if (result.Succeeded)
         {
             statusPanelWindow?.AnnounceWorkspace(workspace);
+            minimizedWindowVisibilityService?.Synchronize();
+            systemTrayService.RefreshMinimizedWindows();
             logger.Info($"Workspace activo: {workspace}.");
         }
         else
@@ -641,6 +873,8 @@ internal sealed class ShellHost : IDisposable
         var result = workspaceManager.MoveForegroundTo(workspace);
         if (result.Succeeded)
         {
+            minimizedWindowVisibilityService?.Synchronize();
+            systemTrayService.RefreshMinimizedWindows();
             logger.Info($"Ventana activa movida al workspace {workspace}.");
         }
         else
@@ -693,6 +927,74 @@ internal sealed class ShellHost : IDisposable
         Console.Error.WriteLine($"No se pudo abrir la bandeja del sistema: {error}");
     }
 
+    private void OnDockItemRequested(string action)
+    {
+        logger.Info($"Acción del dock solicitada: {action}.");
+        if (!action.Equals("network", StringComparison.OrdinalIgnoreCase))
+            systemTrayService.Close();
+        switch (action.Trim().ToLowerInvariant())
+        {
+            case "terminal": ReportLaunchFailure("terminal", actions.LaunchTerminal()); break;
+            case "files": ReportLaunchFailure("Yazi", actions.LaunchFiles()); break;
+            case "browser": ReportLaunchFailure("navegador", actions.LaunchBrowser()); break;
+            case "launcher": ReportLaunchFailure("launcher", actions.LaunchLauncher()); break;
+            case "input-language": OpenInputLanguageSelector(); break;
+            case "network":
+                if (!systemTrayService.TryOpenNetworkMenu(out var networkError) && networkError is not null)
+                    logger.Error(networkError);
+                break;
+            case "wallpaper":
+                if (!systemTrayService.TryOpenWallpaperMenu(out var wallpaperError) && wallpaperError is not null)
+                    logger.Error(wallpaperError);
+                break;
+            case "windows":
+                if (!systemTrayService.TryOpenMinimizedWindowsMenu(out var windowsError) && windowsError is not null)
+                    logger.Error(windowsError);
+                break;
+            case "logout": RequestSessionAction(SessionAction.Logout); break;
+            case "shutdown": RequestSessionAction(SessionAction.Shutdown); break;
+            case "restart": RequestSessionAction(SessionAction.Restart); break;
+            case "recovery": OnRecoveryRequested(); break;
+            default: logger.Error($"Acción del dock no reconocida: {action}."); break;
+        }
+    }
+
+    private void RequestSessionAction(SessionAction action)
+    {
+        if (sessionConfirmation.Status == SessionConfirmationStatus.AwaitingConfirmation &&
+            sessionConfirmation.PendingAction == action)
+        {
+            statusPanelWindow?.SetSessionConfirmation(SessionConfirmationStatus.Executing, action);
+            logger.Info($"Ejecutando acción de sesión confirmada: {action}.");
+            _ = sessionConfirmation.ConfirmAsync(sessionActions).ContinueWith(task =>
+            {
+                if (!task.Result) logger.Error($"La acción de sesión no pudo ejecutarse: {action}.");
+                statusPanelWindow?.SetSessionConfirmation(sessionConfirmation.Status, sessionConfirmation.PendingAction);
+            }, TaskScheduler.Default);
+            return;
+        }
+
+        if (sessionConfirmation.Request(action))
+        {
+            statusPanelWindow?.SetSessionConfirmation(sessionConfirmation.Status, sessionConfirmation.PendingAction);
+            logger.Info($"Se solicitó confirmación para la acción de sesión: {action}. Repite la acción para confirmar.");
+        }
+        else
+        {
+            statusPanelWindow?.SetSessionConfirmation(sessionConfirmation.Status, sessionConfirmation.PendingAction);
+            logger.Info($"Se canceló la confirmación pendiente al solicitar otra acción de sesión: {action}.");
+        }
+    }
+
+    private void CancelSessionConfirmation()
+    {
+        if (sessionConfirmation.Cancel())
+        {
+            statusPanelWindow?.SetSessionConfirmation(sessionConfirmation.Status, sessionConfirmation.PendingAction);
+            logger.Info("Se canceló la confirmación de sesión.");
+        }
+    }
+
     private void OnSystemTrayVisibilityChanged(bool isVisible)
     {
         statusPanelWindow?.SetMenuActive("system-tray", isVisible);
@@ -707,6 +1009,27 @@ internal sealed class ShellHost : IDisposable
             hasIcon = received.Notification.IconPng is { Length: > 0 },
             received.Historical
         });
+    }
+
+    private void OnPackagedApplicationActivationFailed(object? sender, PackagedApplicationActivationFailedEventArgs args)
+    {
+        var result = args.Result;
+        var detail = $"Falló la activación MSIX/UWP de '{args.Application.DisplayName}': " +
+                     $"AUMID='{args.Application.AppUserModelId}', etapa={result.Stage}, " +
+                     $"HRESULT={result.HResultHex}, timeout={(result.TimedOut ? "sí" : "no")}, detalle={result.Message}";
+        logger.Error(detail);
+        Console.Error.WriteLine(detail);
+
+        var body = result.TimedOut
+            ? "La solicitud no respondió en cinco segundos. Puede depender de componentes de sesión y Windows podría completarla después."
+            : $"Windows devolvió {result.HResultHex}.";
+        notificationCenter.Add(new ShellNotification(
+            $"packaged-activation-{Guid.NewGuid():N}",
+            "TenchyShell.PackagedActivation",
+            "TenchyShell",
+            $"No se pudo abrir {args.Application.DisplayName}",
+            body,
+            DateTimeOffset.UtcNow));
     }
 
     private void OpenInputLanguageSelector()
@@ -732,6 +1055,11 @@ internal sealed class ShellHost : IDisposable
 
     private void OnApplicationSelected(ApplicationEntry application)
     {
+        if (applicationLauncher is null)
+        {
+            return;
+        }
+
         benchmarkRecorder.Record("application_requested", new { application.DisplayName, application.Target, application.Arguments });
         var result = applicationLauncher.Launch(application);
 
@@ -805,5 +1133,20 @@ internal sealed class ShellHost : IDisposable
         args.Cancel = true;
         logger.Info("Cierre solicitado mediante Ctrl+C.");
         messageLoop.Stop();
+    }
+
+    private void LogOptionalComponentState()
+    {
+        logger.Info($"Estado efectivo del dock: {(optionalComponents.DockEnabled ? "habilitado" : "deshabilitado")}.");
+        if (!optionalComponents.DockEnabled)
+        {
+            logger.Info($"Dock opcional deshabilitado; no se creará su superficie ni se registrará su hotkey. Motivo: {optionalComponents.DockDisabledReason}");
+        }
+
+        logger.Info($"Estado efectivo del buscador de aplicaciones: {(optionalComponents.ApplicationSearchEnabled ? "habilitado" : "deshabilitado")}.");
+        if (!optionalComponents.ApplicationSearchEnabled)
+        {
+            logger.Info($"Buscador de aplicaciones opcional deshabilitado; no se crearán catálogo ni launcher. Motivo: {optionalComponents.ApplicationSearchDisabledReason}");
+        }
     }
 }

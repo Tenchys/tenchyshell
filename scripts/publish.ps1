@@ -16,11 +16,15 @@ dotnet publish $project `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     --output $output
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet publish terminó con código $LASTEXITCODE; no se generará un manifiesto de benchmark."
+}
 
 Copy-Item (Join-Path $repoRoot "config\TenchyShell.example.toml") (Join-Path $output "TenchyShell.example.toml") -Force
 Copy-Item (Join-Path $repoRoot "config\TenchyShell.without-explorer.example.toml") (Join-Path $output "TenchyShell.without-explorer.example.toml") -Force
 New-Item -ItemType Directory -Path (Join-Path $output "scripts") -Force | Out-Null
 Copy-Item (Join-Path $repoRoot "scripts\mouse-battery.example.ps1") (Join-Path $output "scripts\mouse-battery.example.ps1") -Force
+Copy-Item (Join-Path $repoRoot "scripts\summarize-live-telemetry.ps1") (Join-Path $output "scripts\summarize-live-telemetry.ps1") -Force
 
 $gitCommit = $null
 $gitDirty = $null

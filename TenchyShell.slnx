@@ -6,7 +6,9 @@
   <Project Path="src/TenchyShell.NotificationTestSender/TenchyShell.NotificationTestSender.csproj" />
   <Project Path="src/TenchyShell.Workspaces/TenchyShell.Workspaces.csproj" />
   <Project Path="src/TenchyShell.UI/TenchyShell.UI.csproj" />
+  <Project Path="src/TenchyShell.Tui/TenchyShell.Tui.csproj" />
   <Project Path="tests/TenchyShell.Core.Tests/TenchyShell.Core.Tests.csproj" />
+  <Project Path="tests/TenchyShell.App.Tests/TenchyShell.App.Tests.csproj" />
   <Project Path="tests/TenchyShell.Win32.Tests/TenchyShell.Win32.Tests.csproj" />
   <Project Path="tests/TenchyShell.Workspaces.Tests/TenchyShell.Workspaces.Tests.csproj" />
 </Solution>

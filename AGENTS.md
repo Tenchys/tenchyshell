@@ -150,11 +150,13 @@ Evaluar operaciones como mover o redimensionar ventanas, navegación de foco y t
 - Mantener la identidad `TenchyShell` y la migración idempotente y no destructiva
   desde configuración, logs y estado heredados de `MinimalShell`.
 
-## Roadmap del MVP 0.5
+## Roadmap de hitos posteriores
 
 Los hitos posteriores al MVP 0.1 están definidos en
 [`mds/mvp-0.5.md`](mds/mvp-0.5.md), [`mds/mvp-0.6.md`](mds/mvp-0.6.md) y
-[`mds/mvp-0.7.md`](mds/mvp-0.7.md). Antes de implementar una funcionalidad,
+[`mds/mvp-0.7.md`](mds/mvp-0.7.md). El hito actual de estabilización 0.8.7 y su
+benchmark externo v3 están definidos en [`mds/mvp-0.8.md`](mds/mvp-0.8.md).
+Antes de implementar una funcionalidad,
 revisar el documento correspondiente y respetar su orden, dependencias,
 entregables y pruebas.
 

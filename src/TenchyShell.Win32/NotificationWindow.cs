@@ -83,7 +83,16 @@ public sealed class NotificationWindow : IDisposable
     private void OnNotificationChanged(object? sender, NotificationCenterChangedEventArgs args)
     {
         if (disposed) return;
-        messageLoop.Post(() => ApplyNotificationChange(args));
+        if (messageLoop.IsOnMessageLoopThread)
+        {
+            ApplyNotificationChange(args);
+            return;
+        }
+
+        if (!messageLoop.TryPost(() => ApplyNotificationChange(args)))
+        {
+            logger.Error($"No se pudo encolar el aviso '{args.NotificationId}' en la ventana de notificaciones.");
+        }
     }
 
     private void ApplyNotificationChange(NotificationCenterChangedEventArgs args)
@@ -96,6 +105,7 @@ public sealed class NotificationWindow : IDisposable
             if (notification is not null && cards.Count < MaximumVisibleCards)
             {
                 cards.Add(new VisibleNotification(notification, DateTimeOffset.UtcNow.Add(DisplayDuration), SaveIcon(notification)));
+                logger.Info($"Tarjeta de notificación preparada: '{notification.Title}'.");
             }
         }
         UpdateWindow();
@@ -133,11 +143,17 @@ public sealed class NotificationWindow : IDisposable
         var height = cards.Sum(card => card.Layout.Height) + (cards.Count - 1) * CardGap;
         var x = area.Right - Width - Margin;
         var y = area.Bottom - height - Margin;
-        NativeMethods.SetWindowPos(windowHandle, NativeMethods.HWND_TOPMOST, x, y, Width, height,
-            NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+        if (!NativeMethods.SetWindowPos(windowHandle, NativeMethods.HWND_TOPMOST, x, y, Width, height,
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW))
+        {
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "No se pudo posicionar la ventana de notificaciones.");
+        }
         NativeMethods.ShowWindow(windowHandle, NativeMethods.SW_SHOWNOACTIVATE);
         ArmExpirationTimer();
         NativeMethods.InvalidateRect(windowHandle, IntPtr.Zero, true);
+        logger.Info($"Tarjeta de notificación visible en ({x}, {y}) con tamaño {Width}x{height}.");
     }
 
     private void ArmExpirationTimer()

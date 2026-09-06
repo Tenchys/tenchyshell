@@ -2,10 +2,12 @@ using System.Diagnostics;
 using TenchyShell.Core.Configuration;
 using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.Logging;
+using TenchyShell.Core.Applications;
 using TenchyShell.Core.Commands;
 using TenchyShell.Core.Session;
 using TenchyShell.Core.Runtime;
 using TenchyShell.Win32;
+using TenchyShell.Tui;
 
 namespace TenchyShell.App;
 
@@ -22,12 +24,34 @@ internal static class Program
         var migration = LegacyDataMigrator.MigrateDefault();
         var logger = new FileLogger();
         ReportLegacyMigration(logger, migration);
+        if (!PackagedActivationDiagnosticOptions.TryParse(args, out var packagedDiagnostic, out var packagedDiagnosticError))
+        {
+            Console.Error.WriteLine(packagedDiagnosticError);
+            return 1;
+        }
+        if (HasArgument(args, "--tui"))
+        {
+            if (packagedDiagnostic is not null)
+            {
+                Console.Error.WriteLine("--diagnose-packaged no se puede combinar con --tui.");
+                return 1;
+            }
+            if (!TuiArgumentParser.TryGetConfigurationPath(args, out var tuiPath, out var tuiError))
+            {
+                Console.Error.WriteLine(tuiError);
+                return 1;
+            }
+
+            return TuiApplication.Run(Path.GetFullPath(tuiPath!), logger);
+        }
+
         var launchIndex = Array.FindIndex(args, argument => argument.Equals("--launch", StringComparison.OrdinalIgnoreCase));
         var sessionIndex = Array.FindIndex(args, argument => argument.Equals("--session", StringComparison.OrdinalIgnoreCase));
         var withoutExplorer = args.Any(argument => argument.Equals("--without-explorer", StringComparison.OrdinalIgnoreCase));
         var automatedBenchmark = HasArgument(args, "--automated-benchmark");
         var testNotification = HasArgument(args, "--test-notification");
         var checkOnly = HasArgument(args, "--check");
+        var withoutTui = HasArgument(args, "--without-tui");
         if (!TryGetOptionalPositiveInteger(args, "--exit-after-seconds", 3600, out var exitAfterSeconds, out var optionError))
         {
             Console.Error.WriteLine(optionError);
@@ -40,7 +64,16 @@ internal static class Program
             return 1;
         }
 
+        if (packagedDiagnostic is not null && !exitAfterSeconds.HasValue)
+        {
+            Console.Error.WriteLine("--diagnose-packaged requiere --exit-after-seconds.");
+            return 1;
+        }
+
         var configurationPath = ConfigurationPathResolver.Resolve(GetConfigurationPath(args));
+        var effectiveConfigurationPath = configurationPath is null
+            ? ConfigurationPathResolver.GetDefaultPath()
+            : Path.GetFullPath(configurationPath);
         var result = new TomlConfigurationProvider(logger).Load(configurationPath);
 
         if (!result.IsValid)
@@ -119,7 +152,7 @@ internal static class Program
 
         if (automatedBenchmark)
         {
-            logger.Info($"Benchmark automatizado solicitado; Explorer se restaurará al finalizar en un máximo de {exitAfterSeconds} segundos.");
+            logger.Info($"Benchmark automatizado solicitado; la telemetría live queda suprimida y Explorer se restaurará al finalizar en un máximo de {exitAfterSeconds} segundos.");
         }
 
         if (!SingleInstanceGuard.TryAcquire("Local\\MinimalShell.SingleInstance", out var legacyInstanceGuard))
@@ -144,8 +177,14 @@ internal static class Program
             using (legacyInstanceGuard!)
             using (instanceGuard!)
             {
-                using var shell = new ShellHost(result.Configuration, logger, withoutExplorer);
-                return shell.Run(exitAfterSeconds, testNotification);
+                using var shell = new ShellHost(
+                    result.Configuration,
+                    logger,
+                    withoutExplorer,
+                    startTui: !withoutTui && packagedDiagnostic is null,
+                    effectiveConfigurationPath: effectiveConfigurationPath,
+                    suppressLiveBenchmark: automatedBenchmark);
+                return shell.Run(exitAfterSeconds, testNotification, packagedDiagnostic);
             }
         }
         finally
@@ -214,7 +253,9 @@ internal static class Program
         {
             if (args[index].Equals("--launch", StringComparison.OrdinalIgnoreCase) ||
                 args[index].Equals("--session", StringComparison.OrdinalIgnoreCase) ||
-                args[index].Equals("--exit-after-seconds", StringComparison.OrdinalIgnoreCase))
+                args[index].Equals("--exit-after-seconds", StringComparison.OrdinalIgnoreCase) ||
+                args[index].Equals("--diagnose-packaged", StringComparison.OrdinalIgnoreCase) ||
+                args[index].Equals("--activation-context", StringComparison.OrdinalIgnoreCase))
             {
                 index++;
                 continue;
@@ -307,7 +348,10 @@ internal static class Program
         Console.WriteLine("  TenchyShell.exe --check [config.toml]");
         Console.WriteLine("  TenchyShell.exe --launch terminal|files|browser [config.toml]");
         Console.WriteLine("  TenchyShell.exe --without-explorer [config.toml]");
+        Console.WriteLine("  TenchyShell.exe --without-tui [config.toml]");
+        Console.WriteLine("  TenchyShell.exe --tui <config.toml>");
         Console.WriteLine("  TenchyShell.exe --exit-after-seconds N [config.toml]");
+        Console.WriteLine("  TenchyShell.exe --diagnose-packaged <AUMID> [--diagnose-packaged <AUMID> ...] [--activation-context in-process|local-server|both] --exit-after-seconds N [config.toml]");
         Console.WriteLine("  TenchyShell.exe --test-notification [config.toml]");
         Console.WriteLine("  TenchyShell.exe --automated-benchmark --without-explorer --exit-after-seconds N [config.toml]");
         Console.WriteLine("  TenchyShell.exe --session logout|shutdown|restart --confirm [config.toml]");
@@ -317,6 +361,8 @@ internal static class Program
         Console.WriteLine("--exit-after-seconds cierra limpiamente una sesión de benchmark o integración.");
         Console.WriteLine("--test-notification muestra una tarjeta local; requiere benchmark y notificaciones habilitados.");
         Console.WriteLine("--automated-benchmark exige un cierre acotado y restaura Explorer al terminar.");
+        Console.WriteLine("--without-tui inicia el shell sin abrir la TUI; --tui ejecuta la interfaz dentro del terminal.");
+        Console.WriteLine("--diagnose-packaged compara la activación oficial por AUMID sin iniciar Explorer; por defecto prueba ambos contextos COM y no abre la TUI.");
     }
 
     private static TenchyShell.Core.Processes.ProcessLaunchResult ExecuteLaunchAction(

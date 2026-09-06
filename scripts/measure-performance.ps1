@@ -7,6 +7,12 @@ param(
     [ValidateSet("Idle", "CommonWorkflow", "TenchyShellStress")]
     [string]$Phase = "Idle",
 
+    [Parameter(Mandatory)]
+    [ValidateRange(1, 2147483647)]
+    [int]$MainProcessId,
+
+    [int[]]$ExcludedProcessIds = @(),
+
     [ValidateRange(1, 20)]
     [int]$Repetitions = 5,
 
@@ -51,18 +57,21 @@ param(
 
     [switch]$AllowExistingToolsForSmoke,
 
-    [string]$OutputDirectory = (Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v2")
+    [string]$OutputDirectory = (Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v3")
 )
 
 $ErrorActionPreference = "Stop"
-$schemaVersion = 2
+$schemaVersion = 3
 $logicalProcessorCount = [Environment]::ProcessorCount
 $collectorProcessId = $PID
 $collectorSessionId = (Get-Process -Id $PID).SessionId
+$excludedProcessIdSet = [Collections.Generic.HashSet[int]]::new()
+foreach ($excludedProcessId in @($ExcludedProcessIds)) { [void]$excludedProcessIdSet.Add([int]$excludedProcessId) }
 $browserNames = @("brave", "chrome", "firefox", "msedge", "opera")
 $toolNames = @("wezterm", "wezterm-gui", "yazi")
 $wezTermNames = @("wezterm", "wezterm-gui")
 $scenarioNames = if ($Scenario -eq "TenchyShell") { @("tenchyshell", "minimalshell") } else { @("explorer") }
+$auxiliaryNames = @("tenchyshell", "minimalshell", "tenchyshell.notificationbridge", "tenchyshellnotificationbridge")
 $contaminationExclusions = @(
     "idle", "dwm", "system", "shellexperiencehost", "startmenuexperiencehost",
     "searchhost", "textinputhost", "runtimebroker", "applicationframehost"
@@ -376,13 +385,49 @@ function Get-EnvironmentMetadata {
     }
 }
 
-function Get-RoleMap($CimProcesses) {
+function Get-ExcludedProcessIds($CimProcesses) {
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    foreach ($id in $excludedProcessIdSet) { [void]$excluded.Add([int]$id) }
+    return $excluded
+}
+
+function Get-RoleMap($CimProcesses, $ExcludedIds = $null) {
     $roles = @{}
+    $main = @($CimProcesses | Where-Object { [int]$_.ProcessId -eq $MainProcessId })
+    if ($main.Count -eq 1) { $roles[$MainProcessId] = "Core" }
+
+    if ($Scenario -eq "TenchyShell") {
+        foreach ($process in $CimProcesses) {
+            $name = Get-NormalizedProcessName $process.Name
+            $processId = [int]$process.ProcessId
+            if ($processId -ne $collectorProcessId -and
+                $processId -ne $MainProcessId -and
+                $auxiliaryNames -contains $name) {
+                $roles[$processId] = "Auxiliary"
+            }
+        }
+
+        # El árbol iniciado por el núcleo (terminal/TUI y sus descendientes) es
+        # parte de la sesión, pero nunca convierte otra TenchyShell.exe en Core.
+        $changed = $true
+        while ($changed) {
+            $changed = $false
+            foreach ($process in $CimProcesses) {
+                $processId = [int]$process.ProcessId
+                $parentId = [int]$process.ParentProcessId
+                if ($processId -eq $collectorProcessId -or ($null -ne $ExcludedIds -and (@($ExcludedIds) -contains $processId)) -or $roles.ContainsKey($processId)) { continue }
+                if ($roles[$parentId] -in @("Core", "Auxiliary")) {
+                    $roles[$processId] = "Auxiliary"
+                    $changed = $true
+                }
+            }
+        }
+    }
+
     foreach ($process in $CimProcesses) {
         $name = Get-NormalizedProcessName $process.Name
         $processId = [int]$process.ProcessId
-        if ($browserNames -contains $name -or $processId -eq $collectorProcessId) { continue }
-        if ($scenarioNames -contains $name) { $roles[$processId] = "Shell" }
+        if ($processId -eq $collectorProcessId -or ($null -ne $ExcludedIds -and (@($ExcludedIds) -contains $processId)) -or $roles.ContainsKey($processId)) { continue }
         if ($toolNames -contains $name) { $roles[$processId] = "Tool" }
     }
 
@@ -395,7 +440,7 @@ function Get-RoleMap($CimProcesses) {
             $parentId = [int]$process.ParentProcessId
             $name = Get-NormalizedProcessName $process.Name
             if ($processId -ne $collectorProcessId -and
-                $browserNames -notcontains $name -and
+                ($null -eq $ExcludedIds -or -not (@($ExcludedIds) -contains $processId)) -and
                 $roles[$parentId] -eq "Tool" -and
                 -not $roles.ContainsKey($processId)) {
                 $roles[$processId] = "Tool"
@@ -427,10 +472,11 @@ function Get-Totals($Rows) {
 }
 
 function Get-ToolRootProcesses {
-    return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.SessionId -eq $collectorSessionId -and
-            $toolNames -contains (Get-NormalizedProcessName $_.ProcessName)
-    })
+    $cimProcesses = @(Get-CimInstance Win32_Process | Where-Object { [int]$_.SessionId -eq $collectorSessionId })
+    $excludedIds = Get-ExcludedProcessIds $cimProcesses
+    $roles = Get-RoleMap $cimProcesses $excludedIds
+    $toolIds = @($roles.Keys | Where-Object { $roles[[int]$_] -eq "Tool" })
+    return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -in $toolIds })
 }
 
 function Get-Sample(
@@ -439,18 +485,22 @@ function Get-Sample(
     [hashtable]$PreviousWriteBytes,
     [hashtable]$ExternalStreaks,
     [datetime]$PreviousTimestamp) {
+    $samplingStopwatch = [Diagnostics.Stopwatch]::StartNew()
     $timestamp = Get-Date
     $cimProcesses = @(Get-CimInstance Win32_Process | Where-Object { [int]$_.SessionId -eq $collectorSessionId })
-    $roles = Get-RoleMap $cimProcesses
-    $shellRoots = @($cimProcesses | Where-Object { $scenarioNames -contains (Get-NormalizedProcessName $_.Name) })
+    $excludedIds = Get-ExcludedProcessIds $cimProcesses
+    $roles = Get-RoleMap $cimProcesses $excludedIds
+    $coreProcesses = @($cimProcesses | Where-Object { [int]$_.ProcessId -eq $MainProcessId })
     $elapsedMilliseconds = [Math]::Max(1, ($timestamp - $PreviousTimestamp).TotalMilliseconds)
     $processRows = [Collections.Generic.List[object]]::new()
     $externalRows = [Collections.Generic.List[object]]::new()
     $activeExternalIds = [Collections.Generic.HashSet[int]]::new()
+    $observerRow = $null
 
     foreach ($cim in $cimProcesses) {
         $processId = [int]$cim.ProcessId
         if ($processId -eq 0) { continue }
+        if (@($excludedIds) -contains $processId) { continue }
         $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
         if ($null -eq $process) { continue }
         $cpuMilliseconds = $process.TotalProcessorTime.TotalMilliseconds
@@ -491,7 +541,16 @@ function Get-Sample(
                 writeBytesPerSecond = $writeRate
                 startTime = try { $process.StartTime.ToUniversalTime().ToString("O") } catch { $null }
             })
-        } elseif ($processId -ne $collectorProcessId -and $null -ne $cpuPercent) {
+        } elseif ($processId -eq $collectorProcessId) {
+            $observerRow = [ordered]@{
+                processId = $collectorProcessId
+                cpuPercent = $cpuPercent
+                totalProcessorMilliseconds = $cpuMilliseconds
+                privateBytes = [long]$process.PrivateMemorySize64
+                workingSetBytes = [long]$process.WorkingSet64
+                samplingDurationMilliseconds = $null
+            }
+        } elseif ($null -ne $cpuPercent) {
             $name = Get-NormalizedProcessName $process.ProcessName
             $externalRows.Add([pscustomobject][ordered]@{
                 id = $processId
@@ -507,28 +566,39 @@ function Get-Sample(
     }
 
     foreach ($trackedId in @($ExternalStreaks.Keys)) {
-        if (-not $activeExternalIds.Contains([int]$trackedId)) { $ExternalStreaks.Remove($trackedId) }
+        if (-not (@($activeExternalIds) -contains [int]$trackedId)) { $ExternalStreaks.Remove($trackedId) }
     }
     $contaminating = @($externalRows | Where-Object {
         -not $_.ignoredForContamination -and
         $ExternalStreaks.ContainsKey([int]$_.id) -and
         [int]$ExternalStreaks[[int]$_.id] -ge $consecutiveSamplesRequired
     })
-    $shellRows = @($processRows | Where-Object role -eq "Shell")
+    $coreRows = @($processRows | Where-Object role -eq "Core")
+    $auxiliaryRows = @($processRows | Where-Object role -eq "Auxiliary")
+    $shellSessionRows = @($processRows | Where-Object { $_.role -in @("Core", "Auxiliary") })
     $toolRows = @($processRows | Where-Object role -eq "Tool")
-    return [ordered]@{
+    $sample = [ordered]@{
         capturedAt = $timestamp.ToUniversalTime().ToString("O")
+        mainProcessId = $MainProcessId
         processes = @($processRows)
         totalsByRole = [ordered]@{
-            Shell = Get-Totals $shellRows
+            Core = Get-Totals $coreRows
+            Auxiliary = Get-Totals $auxiliaryRows
+            ShellSession = Get-Totals $shellSessionRows
             Tool = Get-Totals $toolRows
             Total = Get-Totals $processRows
         }
-        shellProcessCount = $shellRoots.Count
+        coreProcessCount = $coreProcesses.Count
+        observer = $observerRow
         topExternalProcesses = @($externalRows | Sort-Object cpuPercent -Descending | Select-Object -First 5)
         contaminationDetected = $contaminating.Count -gt 0
         contaminatingProcesses = @($contaminating)
     }
+    $samplingStopwatch.Stop()
+    if ($null -ne $observerRow) {
+        $observerRow.samplingDurationMilliseconds = $samplingStopwatch.Elapsed.TotalMilliseconds
+    }
+    return $sample
 }
 
 function Wait-Until([Diagnostics.Stopwatch]$Stopwatch, [double]$TargetMilliseconds) {
@@ -539,7 +609,7 @@ function Wait-Until([Diagnostics.Stopwatch]$Stopwatch, [double]$TargetMillisecon
 }
 
 function Add-Reason([Collections.Generic.List[string]]$Reasons, [string]$Reason) {
-    if (-not $Reasons.Contains($Reason)) { $Reasons.Add($Reason) }
+    if (-not (@($Reasons) -contains $Reason)) { [void]$Reasons.Add($Reason) }
 }
 
 $captureOutputDirectory = if ([string]::IsNullOrWhiteSpace($BatchId)) { $OutputDirectory } else { Join-Path $OutputDirectory $BatchId }
@@ -547,17 +617,38 @@ if (-not (Test-Path -LiteralPath $captureOutputDirectory -PathType Container)) {
     New-Item -ItemType Directory -Path $captureOutputDirectory -Force | Out-Null
 }
 
-$preflightCim = @(Get-CimInstance Win32_Process | Where-Object { [int]$_.SessionId -eq $collectorSessionId })
-$preflightShellCount = @($preflightCim | Where-Object { $scenarioNames -contains (Get-NormalizedProcessName $_.Name) }).Count
-if ($preflightShellCount -ne 1) {
-    throw "Se requiere exactamente una shell de $Scenario; se encontraron $preflightShellCount."
+$allPreflightCim = @(Get-CimInstance Win32_Process)
+$mainMatches = @($allPreflightCim | Where-Object { [int]$_.ProcessId -eq $MainProcessId })
+if ($mainMatches.Count -eq 0) { throw "El PID principal $MainProcessId está ausente o finalizado." }
+if ($mainMatches.Count -ne 1) { throw "El PID principal $MainProcessId aparece duplicado." }
+if ([int]$mainMatches[0].SessionId -ne $collectorSessionId) {
+    throw "El PID principal $MainProcessId pertenece a otra sesión ($($mainMatches[0].SessionId)); se esperaba $collectorSessionId."
 }
-$preflightTools = @(Get-ToolRootProcesses)
+$mainName = Get-NormalizedProcessName $mainMatches[0].Name
+if ($scenarioNames -notcontains $mainName) {
+    throw "El PID principal $MainProcessId pertenece a '$mainName', no al escenario $Scenario."
+}
+if ($MainProcessId -eq $collectorProcessId) { throw "El PID principal no puede ser el PID del observador." }
+$mainProcessStartedAt = (Get-Process -Id $MainProcessId -ErrorAction Stop).StartTime.ToUniversalTime().ToString("O")
+$preflightCim = @($allPreflightCim | Where-Object { [int]$_.SessionId -eq $collectorSessionId })
+$preflightTools = @($preflightCim | Where-Object { (Get-NormalizedProcessName $_.Name) -in $toolNames })
 if ($Phase -eq "Idle") {
-    $hasWezTerm = @($preflightTools | Where-Object { $wezTermNames -contains (Get-NormalizedProcessName $_.ProcessName) }).Count -gt 0
-    $hasYazi = @($preflightTools | Where-Object { (Get-NormalizedProcessName $_.ProcessName) -eq "yazi" }).Count -gt 0
+    $hasWezTerm = @($preflightTools | Where-Object { $wezTermNames -contains (Get-NormalizedProcessName $_.Name) }).Count -gt 0
+    $hasYazi = @($preflightTools | Where-Object { (Get-NormalizedProcessName $_.Name) -eq "yazi" }).Count -gt 0
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ((-not $hasWezTerm -or -not $hasYazi) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 250
+        $preflightCim = @(Get-CimInstance Win32_Process | Where-Object { [int]$_.SessionId -eq $collectorSessionId })
+        $preflightTools = @($preflightCim | Where-Object { (Get-NormalizedProcessName $_.Name) -in $toolNames })
+        $hasWezTerm = @($preflightTools | Where-Object { $wezTermNames -contains (Get-NormalizedProcessName $_.Name) }).Count -gt 0
+        $hasYazi = @($preflightTools | Where-Object { (Get-NormalizedProcessName $_.Name) -eq "yazi" }).Count -gt 0
+    }
     if (-not $hasWezTerm -or -not $hasYazi) {
-        throw "Idle requiere una instancia de WezTerm con Yazi abierta antes de medir."
+        $observedTools = @($preflightCim | Where-Object {
+            $toolName = Get-NormalizedProcessName $_.Name
+            $toolName -in $toolNames
+        } | ForEach-Object { "$($_.Name)[$($_.ProcessId)]<-[$($_.ParentProcessId)]" }) -join ", "
+        throw "Idle requiere una instancia de WezTerm con Yazi abierta antes de medir. Observados: $observedTools; excluidos: $(@($ExcludedProcessIds) -join ',')."
     }
 } elseif ($preflightTools.Count -gt 0 -and -not $AllowExistingToolsForSmoke) {
     throw "$Phase requiere comenzar sin procesos WezTerm/Yazi; se encontraron $($preflightTools.Count)."
@@ -618,17 +709,24 @@ for ($repetition = 1; $repetition -le $Repetitions; $repetition++) {
             $targetProcessId = $null
             try {
                 $windows = @(Get-ToolRootProcesses | Where-Object {
-                    -not $initialToolIds.Contains([int]$_.Id) -and
+                    -not (@($initialToolIds) -contains [int]$_.Id) -and
                     $wezTermNames -contains (Get-NormalizedProcessName $_.ProcessName) -and
                     $_.MainWindowHandle -ne [IntPtr]::Zero
                 })
                 if ($windows.Count -ne 1) { throw "Se esperaba una ventana nueva de WezTerm y se encontraron $($windows.Count)." }
                 $targetProcessId = [int]$windows[0].Id
                 if (-not [TenchyShellBenchmarkInput]::TrySendQuit($windows[0].MainWindowHandle)) {
-                    throw "No se pudo confirmar el foco exclusivo de la ventana de prueba."
+                    if (-not $AllowExistingToolsForSmoke -or -not $windows[0].CloseMainWindow()) {
+                        throw "No se pudo confirmar el foco exclusivo de la ventana de prueba."
+                    }
                 }
             } catch {
-                Add-Reason $runReasons "No se pudo solicitar a Yazi un cierre dirigido: $($_.Exception.Message)"
+                if ($AllowExistingToolsForSmoke -and $null -ne $targetProcessId) {
+                    try { Stop-Process -Id $targetProcessId -Force -ErrorAction SilentlyContinue } catch { }
+                    Write-Warning "Smoke: se limpió el PID de workflow $targetProcessId tras fallar el foco dirigido."
+                } else {
+                    Add-Reason $runReasons "No se pudo solicitar a Yazi un cierre dirigido: $($_.Exception.Message)"
+                }
             }
             $events.Add([ordered]@{ action = "RequestYaziQuit"; scheduledSecond = $WorkflowCloseSecond; emittedAtSecond = $elapsedSeconds; wezTermClass = $workflowClass; targetProcessId = $targetProcessId })
             Write-Host "[$WorkflowCloseSecond s] Salida normal de Yazi solicitada en la ventana dirigida."
@@ -636,9 +734,16 @@ for ($repetition = 1; $repetition -le $Repetitions; $repetition++) {
         }
 
         if ($Phase -eq "CommonWorkflow" -and -not $workflowVerified -and $elapsedSeconds -ge $WorkflowVerifyClosedSecond) {
-            $remainingTools = @(Get-ToolRootProcesses | Where-Object { -not $initialToolIds.Contains([int]$_.Id) })
+            $remainingTools = @(Get-ToolRootProcesses | Where-Object { -not (@($initialToolIds) -contains [int]$_.Id) })
             if ($remainingTools.Count -gt 0) {
-                Add-Reason $runReasons "WezTerm/Yazi no termino dentro del plazo; no se forzo su cierre."
+                if ($AllowExistingToolsForSmoke) {
+                    foreach ($remainingTool in $remainingTools) {
+                        try { Stop-Process -Id ([int]$remainingTool.Id) -Force -ErrorAction SilentlyContinue } catch { }
+                    }
+                    Write-Warning "Smoke: se limpiaron $($remainingTools.Count) procesos de workflow que no terminaron a tiempo."
+                } else {
+                    Add-Reason $runReasons "WezTerm/Yazi no termino dentro del plazo; no se forzo su cierre."
+                }
             }
             $events.Add([ordered]@{ action = "VerifyToolsClosed"; scheduledSecond = $WorkflowVerifyClosedSecond; emittedAtSecond = $elapsedSeconds; remainingProcessCount = $remainingTools.Count })
             $workflowVerified = $true
@@ -719,8 +824,16 @@ for ($repetition = 1; $repetition -le $Repetitions; $repetition++) {
         }
 
         $sample = Get-Sample $previousCpu $previousReadBytes $previousWriteBytes $externalStreaks $previousTimestamp
-        if ([int]$sample.shellProcessCount -ne 1) {
-            Add-Reason $runReasons "La shell dejo de ser unica durante la captura (conteo: $($sample.shellProcessCount))."
+        if ([int]$sample.coreProcessCount -ne 1 -or [int]$sample.totalsByRole.Core.processCount -ne 1) {
+            Add-Reason $runReasons "El PID principal dejó de estar disponible durante la captura (conteo Core: $($sample.coreProcessCount))."
+        } else {
+            $sampleCore = @($sample.processes | Where-Object role -eq "Core")
+            if ($sampleCore.Count -ne 1 -or [string]$sampleCore[0].startTime -ne $mainProcessStartedAt) {
+                Add-Reason $runReasons "El PID principal fue reutilizado o cambió durante la captura."
+            }
+        }
+        if ($null -eq $sample.observer) {
+            Add-Reason $runReasons "No se pudo medir al observador PowerShell/CIM."
         }
         if ($sample.contaminationDetected) {
             $names = @($sample.contaminatingProcesses | ForEach-Object { "$($_.name)[$($_.id)]" }) -join ", "
@@ -770,14 +883,25 @@ $result = [ordered]@{
     }
     environment = $environmentMetadata
     processPolicy = [ordered]@{
-        shellNames = $scenarioNames
+        mainProcessId = $MainProcessId
+        mainProcessStartedAt = $mainProcessStartedAt
+        expectedCoreNames = $scenarioNames
+        auxiliaryNames = $auxiliaryNames
         toolNames = $toolNames
         toolCommand = $ToolCommand
         toolArguments = @($ToolArguments)
         browserNames = $browserNames
         contaminationExclusions = $contaminationExclusions
         allowedExistingToolsForSmoke = [bool]$AllowExistingToolsForSmoke
+        excludedProcessIds = @($ExcludedProcessIds)
         sessionId = $collectorSessionId
+    }
+    observer = [ordered]@{
+        processId = $collectorProcessId
+        sessionId = $collectorSessionId
+        processName = (Get-Process -Id $collectorProcessId).ProcessName
+        collector = "PowerShell/Get-CimInstance Win32_Process"
+        excludedFromAggregates = $true
     }
     runs = @($runs)
 }

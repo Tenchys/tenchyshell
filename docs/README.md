@@ -15,6 +15,7 @@ explican cómo instalar, usar, operar y mantener el proyecto.
 | [Pruebas manuales](MANUAL_TESTING.md) | Checklist funcional de Windows 11. |
 | [Rendimiento](PERFORMANCE.md) | Protocolo reproducible de medición. |
 | [Optimizaciones](OPTIMIZATIONS.md) | Decisiones y resultados de rendimiento. |
+| [Optimizaciones futuras](opti.md) | Hallazgos, hipótesis y mediciones pendientes. |
 
 Las guías se mantienen en español. Los comandos están pensados para PowerShell
 en Windows 11 Pro.

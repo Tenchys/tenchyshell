@@ -48,10 +48,12 @@ public sealed class WallpaperService : IWallpaperService
             var absolutePath = Path.GetFullPath(path);
             if (!File.Exists(absolutePath)) return WallpaperOperationResult.Failure("El fondo seleccionado ya no existe.");
             previousWallpaper ??= GetCurrentWallpaper();
-            if (!surface.SetImage(absolutePath, out var surfaceError))
+            if (!surface.SetImage(absolutePath, out var telemetry, out var surfaceError))
             {
                 return WallpaperOperationResult.Failure(surfaceError ?? "No se pudo mostrar el fondo.");
             }
+
+            logger.Info($"Preparación de fondo: origen={telemetry.SourceWidth}x{telemetry.SourceHeight}, destino={telemetry.TargetWidth}x{telemetry.TargetHeight}, duración={telemetry.DurationMilliseconds} ms, memoria≈{telemetry.EstimatedBytes / (1024d * 1024):F1} MiB.");
 
             var stateResult = stateStore.Save(absolutePath);
             if (!stateResult.Succeeded)
@@ -65,6 +67,18 @@ public sealed class WallpaperService : IWallpaperService
         {
             return WallpaperOperationResult.Failure($"No se pudo aplicar el fondo: {exception.Message}");
         }
+    }
+
+    public WallpaperOperationResult ApplyNoBackground()
+    {
+        if (!surface.SetNoBackground(out var surfaceError))
+        {
+            return WallpaperOperationResult.Failure(surfaceError ?? "No se pudo mostrar el fondo negro.");
+        }
+
+        var stateResult = stateStore.SaveNoBackground();
+        if (!stateResult.Succeeded) logger.Error(stateResult.Error ?? "No se pudo guardar la selección sin fondo.");
+        return WallpaperOperationResult.Success();
     }
 
     public WallpaperOperationResult RestorePrevious()

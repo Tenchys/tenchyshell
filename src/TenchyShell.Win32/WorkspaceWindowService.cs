@@ -9,7 +9,6 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
 {
     private readonly uint currentProcessId = (uint)Environment.ProcessId;
     private readonly LiveBenchmarkRecorder? benchmarkRecorder;
-    private readonly Dictionary<IntPtr, string> benchmarkSignatures = new();
 
     public WorkspaceWindowService(LiveBenchmarkRecorder? benchmarkRecorder = null)
     {
@@ -25,7 +24,6 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
         {
             var snapshot = CreateSnapshot(windowHandle);
             var decision = DecideWindowTracking(snapshot, currentProcessId);
-            RecordBenchmarkDecision(snapshot, decision);
             if (decision.Include) windows.Add(windowHandle);
             return true;
         }, IntPtr.Zero);
@@ -33,7 +31,7 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
         if (stopwatch is not null)
         {
             stopwatch.Stop();
-            benchmarkRecorder!.Record("workspace_window_enumeration", new
+            benchmarkRecorder!.RecordAtMostEverySampleInterval("workspace_window_enumeration", new
             {
                 durationMs = stopwatch.Elapsed.TotalMilliseconds,
                 includedCount = windows.Count
@@ -43,13 +41,44 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
         return windows;
     }
 
-    public string GetWindowTitle(IntPtr windowHandle) => NativeMethods.GetWindowTitle(windowHandle);
+    // El selector necesita el valor Win32 sin sustitutos: WindowSwitcherState
+    // descarta los HWND cuyo título desapareció desde el último Refresh.
+    public string GetWindowTitle(IntPtr windowHandle) => NativeMethods.GetWindowTitleOrEmpty(windowHandle);
+
+    public WorkspaceWindowMetadata GetWindowMetadata(IntPtr windowHandle)
+    {
+        if (windowHandle == IntPtr.Zero || !NativeMethods.IsWindow(windowHandle))
+        {
+            return new WorkspaceWindowMetadata(false, false, false, string.Empty, false);
+        }
+
+        var snapshot = CreateSnapshot(windowHandle);
+        var decision = DecideWindowTracking(snapshot, currentProcessId);
+        return new WorkspaceWindowMetadata(
+            Exists: true,
+            IsVisible: snapshot.IsVisible,
+            IsMinimized: NativeMethods.IsIconic(windowHandle),
+            Title: snapshot.Title,
+            IsOperable: decision.Include);
+    }
 
     public IntPtr GetForegroundWindow() => NativeMethods.GetForegroundWindow();
 
     public void SetVisible(IntPtr windowHandle, bool visible)
     {
         NativeMethods.ShowWindow(windowHandle, visible ? NativeMethods.SW_SHOW : NativeMethods.SW_HIDE);
+    }
+
+    public WorkspaceFocusResult RestoreAndFocus(IntPtr windowHandle)
+    {
+        var metadata = GetWindowMetadata(windowHandle);
+        if (!metadata.Exists || !metadata.IsOperable)
+        {
+            return WorkspaceFocusResult.Failed(WorkspaceFocusFailure.InvalidWindow);
+        }
+
+        NativeMethods.ShowWindow(windowHandle, NativeMethods.SW_RESTORE);
+        return Focus(windowHandle);
     }
 
     public WorkspaceFocusResult Focus(IntPtr windowHandle)
@@ -163,7 +192,7 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
             windowHandle,
             NativeMethods.IsWindowVisible(windowHandle),
             processId,
-            NativeMethods.GetWindowTitle(windowHandle),
+            NativeMethods.GetWindowTitleOrEmpty(windowHandle),
             NativeMethods.GetWindowClassName(windowHandle),
             NativeMethods.GetWindow(windowHandle, NativeMethods.GW_OWNER),
             rootOwner,
@@ -189,31 +218,6 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
         }
 
         return IntPtr.Zero;
-    }
-
-    private void RecordBenchmarkDecision(WorkspaceWindowSnapshot snapshot, WorkspaceWindowDecision decision)
-    {
-        if (benchmarkRecorder is null) return;
-
-        var signature = $"{decision.Include}|{decision.Reason}|{snapshot.ProcessId}|{snapshot.Owner}|{snapshot.RootOwner}|{snapshot.AltTabRepresentative}|{snapshot.ExtendedStyle}|{snapshot.IsVisible}|{snapshot.IsCloaked}|{snapshot.Title}|{snapshot.ClassName}";
-        if (benchmarkSignatures.TryGetValue(snapshot.Handle, out var previous) && previous == signature) return;
-
-        benchmarkSignatures[snapshot.Handle] = signature;
-        benchmarkRecorder.Record("workspace_window_evaluated", new
-        {
-            handle = snapshot.Handle.ToInt64(),
-            included = decision.Include,
-            reason = decision.Reason,
-            title = snapshot.Title,
-            className = snapshot.ClassName,
-            processId = snapshot.ProcessId,
-            owner = snapshot.Owner.ToInt64(),
-            rootOwner = snapshot.RootOwner.ToInt64(),
-            altTabRepresentative = snapshot.AltTabRepresentative.ToInt64(),
-            extendedStyle = $"0x{snapshot.ExtendedStyle:X}",
-            isVisible = snapshot.IsVisible,
-            isCloaked = snapshot.IsCloaked
-        });
     }
 
     internal static WorkspaceWindowDecision DecideWindowTracking(WorkspaceWindowSnapshot window, uint currentProcessId)

@@ -28,6 +28,28 @@ public sealed class StatusPanelState
     }
 }
 
+/// <summary>
+/// Conserva la última marca de segundo pintada por el reloj del panel.
+/// La decisión no depende de Win32 y permite evitar repintados que no cambian
+/// el texto visible.
+/// </summary>
+public sealed class StatusPanelClockState
+{
+    private long? lastSecond;
+
+    public bool ShouldInvalidate(DateTime now)
+    {
+        var currentSecond = now.Ticks / TimeSpan.TicksPerSecond;
+        if (lastSecond == currentSecond)
+        {
+            return false;
+        }
+
+        lastSecond = currentSecond;
+        return true;
+    }
+}
+
 public sealed class StatusPanelVisibilityState
 {
     private readonly HashSet<string> activeMenus = new(StringComparer.Ordinal);

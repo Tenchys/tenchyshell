@@ -5,12 +5,14 @@ namespace TenchyShell.Core.Wallpaper;
 public sealed record WallpaperStateLoadResult(string? LastWallpaperPath, string? Error)
 {
     public bool HasSavedWallpaper => !string.IsNullOrWhiteSpace(LastWallpaperPath);
+    public bool IsNoBackground { get; init; }
 }
 
 public interface IWallpaperStateStore
 {
     WallpaperStateLoadResult Load();
     WallpaperOperationResult Save(string wallpaperPath);
+    WallpaperOperationResult SaveNoBackground();
 }
 
 /// <summary>Guarda solamente la ruta del último fondo aplicado por TenchyShell.</summary>
@@ -35,6 +37,11 @@ public sealed class WallpaperStateStore : IWallpaperStateStore
         try
         {
             var state = JsonSerializer.Deserialize<PersistedWallpaperState>(File.ReadAllText(stateFilePath));
+            if (state?.IsNoBackground == true)
+            {
+                return new(null, null) { IsNoBackground = true };
+            }
+
             if (string.IsNullOrWhiteSpace(state?.LastWallpaperPath))
             {
                 return new(null, "El estado del wallpaper no contiene una ruta válida.");
@@ -61,7 +68,7 @@ public sealed class WallpaperStateStore : IWallpaperStateStore
 
             Directory.CreateDirectory(directory);
             temporaryPath = Path.Combine(directory, $"{StateFileName}.{Guid.NewGuid():N}.tmp");
-            var json = JsonSerializer.Serialize(new PersistedWallpaperState(absolutePath));
+            var json = JsonSerializer.Serialize(new PersistedWallpaperState(absolutePath, false));
             File.WriteAllText(temporaryPath, json);
             File.Move(temporaryPath, stateFilePath, overwrite: true);
             return WallpaperOperationResult.Success();
@@ -86,5 +93,34 @@ public sealed class WallpaperStateStore : IWallpaperStateStore
         }
     }
 
-    private sealed record PersistedWallpaperState(string LastWallpaperPath);
+    public WallpaperOperationResult SaveNoBackground() => SaveState(new PersistedWallpaperState(null, true));
+
+    private WallpaperOperationResult SaveState(PersistedWallpaperState state)
+    {
+        var temporaryPath = string.Empty;
+        try
+        {
+            var directory = Path.GetDirectoryName(stateFilePath);
+            if (string.IsNullOrWhiteSpace(directory)) return WallpaperOperationResult.Failure("La ruta del estado del wallpaper no tiene directorio.");
+
+            Directory.CreateDirectory(directory);
+            temporaryPath = Path.Combine(directory, $"{StateFileName}.{Guid.NewGuid():N}.tmp");
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(state));
+            File.Move(temporaryPath, stateFilePath, overwrite: true);
+            return WallpaperOperationResult.Success();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return WallpaperOperationResult.Failure($"No se pudo guardar el estado del wallpaper: {exception.Message}");
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(temporaryPath) && File.Exists(temporaryPath))
+            {
+                try { File.Delete(temporaryPath); } catch (Exception) { }
+            }
+        }
+    }
+
+    private sealed record PersistedWallpaperState(string? LastWallpaperPath, bool IsNoBackground = false);
 }

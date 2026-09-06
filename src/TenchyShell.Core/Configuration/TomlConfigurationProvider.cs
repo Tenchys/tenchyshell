@@ -28,8 +28,15 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         {
             var text = File.ReadAllText(path);
             var table = Toml.ToModel<TomlTable>(text);
-            var configuration = MapConfiguration(table, Path.GetDirectoryName(Path.GetFullPath(path)) ?? Environment.CurrentDirectory);
-            var errors = Validate(configuration);
+            var configuration = MapConfiguration(
+                table,
+                Path.GetDirectoryName(Path.GetFullPath(path)) ?? Environment.CurrentDirectory,
+                Path.GetFullPath(path));
+            var errors = new List<string>(Validate(configuration));
+            errors.AddRange(ValidateOptionalComponentTypes(table));
+            errors.AddRange(ValidateTuiTypes(table));
+            errors.AddRange(ValidateLocalApiTypes(table));
+            ValidateDockSyntax(table, errors);
 
             if (errors.Count > 0)
             {
@@ -58,12 +65,16 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         }
     }
 
-    private static ShellConfiguration MapConfiguration(TomlTable table, string configurationDirectory = "")
+    private static ShellConfiguration MapConfiguration(
+        TomlTable table,
+        string configurationDirectory = "",
+        string configurationPath = "")
     {
         var defaults = ShellConfiguration.CreateDefault();
         var terminal = GetTable(table, "terminal");
         var fileManager = GetTable(table, "file_manager");
         var launcher = GetTable(table, "launcher");
+        var optionals = GetTable(table, "OPTIONALS");
         var applications = GetTable(table, "applications");
         var statusPanel = GetTable(table, "status_panel");
         var layout = GetTable(table, "layout");
@@ -72,7 +83,10 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         var inputLanguage = GetTable(table, "input_language");
         var wallpaper = GetTable(table, "wallpaper");
         var benchmark = GetTable(table, "benchmark");
-        var notifications = GetTable(table, "notifications");
+            var notifications = GetTable(table, "notifications");
+        var dock = GetTable(table, "dock");
+        var tui = GetTable(table, "tui");
+        var api = GetTable(table, "api");
         var hotkeys = GetTable(table, "hotkeys");
         var workspaceHotkeys = GetTable(hotkeys, "workspaces");
         var windowHotkeys = GetTable(hotkeys, "window");
@@ -84,6 +98,7 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
             ConfigurationDirectory = string.IsNullOrWhiteSpace(configurationDirectory)
                 ? Environment.CurrentDirectory
                 : configurationDirectory,
+            ConfigurationPath = configurationPath,
             Terminal = new TerminalConfiguration
             {
                 Command = GetString(terminal, "command", defaults.Terminal.Command),
@@ -102,6 +117,11 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
             {
                 Enabled = GetBoolean(launcher, "enabled", defaults.Launcher.Enabled),
                 Command = GetString(launcher, "command", defaults.Launcher.Command)
+            },
+            Optionals = new OptionalComponentsConfiguration
+            {
+                Dock = GetBoolean(optionals, "dock", defaults.Optionals.Dock),
+                ApplicationSearch = GetBoolean(optionals, "application_search", defaults.Optionals.ApplicationSearch)
             },
             Applications = new ApplicationConfiguration
             {
@@ -182,6 +202,17 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
             {
                 Enabled = GetBoolean(notifications, "enabled", defaults.Notifications.Enabled)
             },
+            Dock = GetDockConfiguration(table, dock, defaults.Dock),
+            Tui = new TuiConfiguration
+            {
+                Enabled = GetBoolean(tui, "enabled", defaults.Tui.Enabled),
+                Title = GetString(tui, "title", defaults.Tui.Title),
+                Widgets = GetTuiWidgets(tui)
+            },
+            Api = new LocalApiConfiguration
+            {
+                Enabled = GetBoolean(api, "enabled", defaults.Api.Enabled)
+            },
             Hotkeys = new HotkeyConfiguration
             {
                 Terminal = GetString(hotkeys, "terminal", defaults.Hotkeys.Terminal),
@@ -234,6 +265,7 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         AddRequiredError(errors, "hotkeys.browser", configuration.Hotkeys.Browser);
         AddRequiredError(errors, "hotkeys.close_window", configuration.Hotkeys.CloseWindow);
         AddRequiredError(errors, "hotkeys.recovery", configuration.Hotkeys.Recovery);
+        ValidateDock(errors, configuration.Dock);
         if (configuration.Benchmark.Enabled)
         {
             if (!string.Equals(configuration.Benchmark.CaptureProfile, "detailed", StringComparison.OrdinalIgnoreCase))
@@ -251,6 +283,52 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
             if (configuration.Benchmark.MaxStorageMb is < 16 or > 4096)
             {
                 errors.Add("'benchmark.max_storage_mb' debe estar entre 16 y 4096.");
+            }
+        }
+        if (configuration.Tui.Enabled && string.IsNullOrWhiteSpace(configuration.Tui.Title))
+        {
+            errors.Add("'tui.title' no puede estar vacío.");
+        }
+        var widgetIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var widget in configuration.Tui.Widgets)
+        {
+            if (string.IsNullOrWhiteSpace(widget.Id))
+            {
+                errors.Add("'tui.widgets.id' no puede estar vacío.");
+            }
+            else if (!widgetIds.Add(widget.Id))
+            {
+                errors.Add($"'tui.widgets.id' está duplicado: '{widget.Id}'.");
+            }
+
+            if (string.IsNullOrWhiteSpace(widget.Title))
+            {
+                errors.Add($"'tui.widgets.{widget.Id}.title' no puede estar vacío.");
+            }
+
+            if (widget.Type == TuiWidgetType.Unknown)
+            {
+                errors.Add($"'tui.widgets.{widget.Id}.type' debe ser 'static', 'configuration' o 'command'.");
+            }
+            if ((widget.Type is TuiWidgetType.Static or TuiWidgetType.Configuration) && string.IsNullOrWhiteSpace(widget.Source))
+            {
+                errors.Add($"'tui.widgets.{widget.Id}.source' no puede estar vacío.");
+            }
+            if (widget.Type == TuiWidgetType.Command && string.IsNullOrWhiteSpace(widget.Command))
+            {
+                errors.Add($"'tui.widgets.{widget.Id}.command' no puede estar vacío.");
+            }
+            if (widget.TimeoutMilliseconds is < 100 or > 60000)
+            {
+                errors.Add($"'tui.widgets.{widget.Id}.timeout_ms' debe estar entre 100 y 60000.");
+            }
+            if (widget.MaxOutputBytes is < 64 or > 1_048_576)
+            {
+                errors.Add($"'tui.widgets.{widget.Id}.max_output_bytes' debe estar entre 64 y 1048576.");
+            }
+            if (widget.UpdateMilliseconds is < 0 or > 3_600_000)
+            {
+                errors.Add($"'tui.widgets.{widget.Id}.update_ms' debe estar entre 0 y 3600000.");
             }
         }
         if (configuration.Layout.Enabled)
@@ -404,6 +482,181 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
             errors.Add($"'{key}' no puede estar vacío.");
         }
     }
+
+    private static DockConfiguration GetDockConfiguration(TomlTable root, TomlTable dock, DockConfiguration fallback)
+    {
+        var hasCategories = dock.TryGetValue("categories", out var raw) && raw is TomlTableArray;
+        if (!hasCategories) return new DockConfiguration { Enabled = GetBoolean(dock, "enabled", fallback.Enabled), Categories = fallback.Categories };
+        var categories = new List<DockCategoryConfiguration>();
+        foreach (var value in (TomlTableArray)raw!)
+        {
+            if (value is not TomlTable category) { categories.Add(new DockCategoryConfiguration()); continue; }
+            var items = new List<DockItemConfiguration>();
+            if (category.TryGetValue("items", out var itemValue) && itemValue is TomlTableArray itemArray)
+            {
+                foreach (var itemValueEntry in itemArray)
+                {
+                    if (itemValueEntry is TomlTable item)
+                        items.Add(new DockItemConfiguration { Id = GetString(item, "id", string.Empty), Title = GetString(item, "title", string.Empty), Action = GetString(item, "action", string.Empty), Visible = GetBoolean(item, "visible", true) });
+                }
+            }
+            categories.Add(new DockCategoryConfiguration { Id = GetString(category, "id", string.Empty), Title = GetString(category, "title", string.Empty), Order = GetInt(category, "order", 0), Visible = GetBoolean(category, "visible", true), Items = items });
+        }
+        return new DockConfiguration { Enabled = GetBoolean(dock, "enabled", fallback.Enabled), Categories = categories };
+    }
+
+    private static void ValidateDock(ICollection<string> errors, DockConfiguration dock)
+    {
+        if (!dock.Enabled) return;
+        var categoryIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var categoryOrders = new HashSet<int>();
+        var allowedCategories = new HashSet<string>(new[] { "equipo", "aplicaciones", "sesion" }, StringComparer.OrdinalIgnoreCase);
+        var allowedActions = new HashSet<string>(new[] { "network", "wallpaper", "input-language", "windows", "terminal", "files", "browser", "launcher", "logout", "shutdown", "restart", "recovery" }, StringComparer.OrdinalIgnoreCase);
+        var allowedItems = new HashSet<string>(new[] { "network", "wallpaper", "input-language", "windows", "terminal", "files", "browser", "launcher", "logout", "shutdown", "restart", "recovery" }, StringComparer.OrdinalIgnoreCase);
+        foreach (var category in dock.Categories)
+        {
+            if (string.IsNullOrWhiteSpace(category.Id)) errors.Add("'dock.categories.id' no puede estar vacío.");
+            else if (!categoryIds.Add(category.Id)) errors.Add($"'dock.categories.id' está duplicado: '{category.Id}'.");
+            if (!allowedCategories.Contains(category.Id)) errors.Add($"'dock.categories.{category.Id}' no es una categoría permitida.");
+            if (category.Order <= 0) errors.Add($"'dock.categories.{category.Id}.order' debe ser mayor que cero.");
+            else if (!categoryOrders.Add(category.Order)) errors.Add($"'dock.categories.{category.Id}.order' está duplicado: '{category.Order}'.");
+            if (string.IsNullOrWhiteSpace(category.Title)) errors.Add($"'dock.categories.{category.Id}.title' no puede estar vacío.");
+            var itemIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in category.Items)
+            {
+                if (string.IsNullOrWhiteSpace(item.Id)) errors.Add($"'dock.categories.{category.Id}.items.id' no puede estar vacío.");
+                else if (!itemIds.Add(item.Id)) errors.Add($"'dock.categories.{category.Id}.items.id' está duplicado: '{item.Id}'.");
+                if (string.IsNullOrWhiteSpace(item.Title)) errors.Add($"'dock.categories.{category.Id}.items.{item.Id}.title' no puede estar vacío.");
+                if (!allowedItems.Contains(item.Id)) errors.Add($"'dock.categories.{category.Id}.items.{item.Id}' no es un elemento permitido.");
+                if (!allowedActions.Contains(item.Action)) errors.Add($"'dock.categories.{category.Id}.items.{item.Id}.action' no es una acción permitida.");
+            }
+        }
+    }
+
+    private static void ValidateDockSyntax(TomlTable root, ICollection<string> errors)
+    {
+        if (!root.TryGetValue("dock", out var rawDock)) return;
+        if (rawDock is not TomlTable dock) { errors.Add("'dock' debe ser una tabla."); return; }
+        if (dock.TryGetValue("enabled", out var enabled) && enabled is not bool) errors.Add("'dock.enabled' debe ser booleano.");
+        if (!dock.TryGetValue("categories", out var rawCategories)) return;
+        if (rawCategories is not TomlTableArray categories) { errors.Add("'dock.categories' debe ser un array de tablas."); return; }
+        foreach (var rawCategory in categories)
+        {
+            if (rawCategory is not TomlTable category) continue;
+            if (category.TryGetValue("items", out var rawItems) && rawItems is not TomlTableArray)
+                errors.Add("'dock.categories.items' debe ser un array de tablas.");
+        }
+    }
+
+    private static IReadOnlyList<string> ValidateOptionalComponentTypes(TomlTable table)
+    {
+        var errors = new List<string>();
+        var optionals = GetTable(table, "OPTIONALS");
+        AddBooleanTypeError(errors, optionals, "dock");
+        AddBooleanTypeError(errors, optionals, "application_search");
+        return errors;
+    }
+
+    private static IReadOnlyList<string> ValidateTuiTypes(TomlTable table)
+    {
+        var errors = new List<string>();
+        var tui = GetTable(table, "tui");
+        AddBooleanTypeError(errors, tui, "enabled", "tui");
+        if (!tui.TryGetValue("widgets", out var value) || value is not TomlTableArray array)
+        {
+            return errors;
+        }
+
+        foreach (var item in array)
+        {
+            if (item is not TomlTable widget) continue;
+            AddStringTypeError(errors, widget, "id", "tui.widgets");
+            AddStringTypeError(errors, widget, "title", "tui.widgets");
+            AddStringTypeError(errors, widget, "type", "tui.widgets");
+            AddStringTypeError(errors, widget, "source", "tui.widgets");
+            AddStringTypeError(errors, widget, "command", "tui.widgets");
+            AddIntegerTypeError(errors, widget, "timeout_ms", "tui.widgets");
+            AddIntegerTypeError(errors, widget, "max_output_bytes", "tui.widgets");
+            AddIntegerTypeError(errors, widget, "update_ms", "tui.widgets");
+            if (widget.TryGetValue("arguments", out var arguments) && arguments is not TomlArray)
+            {
+                errors.Add("'tui.widgets.arguments' debe ser un array de textos.");
+            }
+            else if (arguments is TomlArray argumentArray && argumentArray.Any(item => item is not string))
+            {
+                errors.Add("'tui.widgets.arguments' debe ser un array de textos.");
+            }
+        }
+        return errors;
+    }
+
+    private static IReadOnlyList<string> ValidateLocalApiTypes(TomlTable table)
+    {
+        var errors = new List<string>();
+        AddBooleanTypeError(errors, GetTable(table, "api"), "enabled", "api");
+        return errors;
+    }
+
+    private static void AddBooleanTypeError(ICollection<string> errors, TomlTable table, string key, string section)
+    {
+        if (table.TryGetValue(key, out var value) && value is not bool)
+        {
+            errors.Add($"'{section}.{key}' debe ser booleano (true o false).");
+        }
+    }
+
+    private static void AddStringTypeError(ICollection<string> errors, TomlTable table, string key, string section)
+    {
+        if (table.TryGetValue(key, out var value) && value is not string)
+        {
+            errors.Add($"'{section}.{key}' debe ser texto.");
+        }
+    }
+
+    private static void AddIntegerTypeError(ICollection<string> errors, TomlTable table, string key, string section)
+    {
+        if (table.TryGetValue(key, out var value) && value is not long)
+        {
+            errors.Add($"'{section}.{key}' debe ser entero.");
+        }
+    }
+
+    private static void AddBooleanTypeError(ICollection<string> errors, TomlTable table, string key)
+    {
+        if (table.TryGetValue(key, out var value) && value is not bool)
+        {
+            errors.Add($"'OPTIONALS.{key}' debe ser booleano (true o false).");
+        }
+    }
+
+    private static IReadOnlyList<TuiWidgetConfiguration> GetTuiWidgets(TomlTable tui)
+    {
+        if (!tui.TryGetValue("widgets", out var value) || value is not TomlTableArray array)
+        {
+            return Array.Empty<TuiWidgetConfiguration>();
+        }
+
+        return array.OfType<TomlTable>().Select(widget => new TuiWidgetConfiguration
+        {
+            Id = GetString(widget, "id", string.Empty),
+            Title = GetString(widget, "title", string.Empty),
+            Type = ParseTuiWidgetType(GetString(widget, "type", string.Empty)),
+            Source = GetString(widget, "source", string.Empty),
+            Command = GetString(widget, "command", string.Empty),
+            Arguments = GetStringArray(widget, "arguments"),
+            TimeoutMilliseconds = GetInt(widget, "timeout_ms", 1500),
+            MaxOutputBytes = GetInt(widget, "max_output_bytes", 4096),
+            UpdateMilliseconds = GetInt(widget, "update_ms", 0)
+        }).ToArray();
+    }
+
+    private static TuiWidgetType ParseTuiWidgetType(string value) => value.Trim().ToLowerInvariant() switch
+    {
+        "static" => TuiWidgetType.Static,
+        "configuration" or "config" => TuiWidgetType.Configuration,
+        "command" or "external" => TuiWidgetType.Command,
+        _ => TuiWidgetType.Unknown
+    };
 
     private static TomlTable GetTable(TomlTable table, string key) =>
         table.TryGetValue(key, out var value) && value is TomlTable nested

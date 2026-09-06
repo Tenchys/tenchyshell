@@ -136,6 +136,7 @@ public static class LegacyDataMigrator
         try
         {
             using var document = JsonDocument.Parse(File.ReadAllText(path));
+            if (document.RootElement.TryGetProperty("IsNoBackground", out var noBackground) && noBackground.ValueKind == JsonValueKind.True) return true;
             return document.RootElement.TryGetProperty("LastWallpaperPath", out var property) &&
                    property.ValueKind == JsonValueKind.String &&
                    !string.IsNullOrWhiteSpace(property.GetString());

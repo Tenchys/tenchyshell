@@ -21,7 +21,8 @@ $shellExecutable = Join-Path $publishDirectory "TenchyShell.exe"
 $normalConfiguration = Join-Path $publishDirectory "TenchyShell.example.toml"
 $withoutExplorerConfiguration = Join-Path $publishDirectory "TenchyShell.without-explorer.example.toml"
 $releaseManifestPath = Join-Path $publishDirectory "benchmark-release.json"
-$benchmarkRoot = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v2"
+$benchmarkRoot = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v3"
+$liveBenchmarkDirectory = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\live"
 $logPath = Join-Path $env:LOCALAPPDATA "TenchyShell\logs\tenchyshell.log"
 $benchmarkSessionId = (Get-Process -Id $PID).SessionId
 $toolNames = @("wezterm", "wezterm-gui", "yazi")
@@ -56,6 +57,9 @@ public static class TenchyShellPerformanceOrchestratorInput
     private static extern IntPtr FindWindow(string className, string windowName);
 
     [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr window);
 
     [DllImport("user32.dll")]
@@ -76,9 +80,12 @@ public static class TenchyShellPerformanceOrchestratorInput
         return true;
     }
 
-    public static bool HasShellTray()
+    public static int GetShellTrayProcessId()
     {
-        return FindWindow("Shell_TrayWnd", null) != IntPtr.Zero;
+        var window = FindWindow("Shell_TrayWnd", null);
+        if (window == IntPtr.Zero) return 0;
+        uint processId;
+        return GetWindowThreadProcessId(window, out processId) == 0 ? 0 : checked((int)processId);
     }
 }
 '@
@@ -100,7 +107,17 @@ function Get-TenchyShellProcesses {
 }
 
 function Test-ShellTrayPresent {
-    return [TenchyShellPerformanceOrchestratorInput]::HasShellTray()
+    return [TenchyShellPerformanceOrchestratorInput]::GetShellTrayProcessId() -gt 0
+}
+
+function Get-ExplorerCoreProcessId {
+    $processId = [TenchyShellPerformanceOrchestratorInput]::GetShellTrayProcessId()
+    if ($processId -le 0) { throw "Shell_TrayWnd no está disponible para identificar el núcleo de Explorer." }
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($null -eq $process -or $process.SessionId -ne $benchmarkSessionId -or $process.ProcessName -ne "explorer") {
+        throw "Shell_TrayWnd pertenece a un proceso inesperado o de otra sesión (PID $processId)."
+    }
+    return [int]$processId
 }
 
 function Wait-Condition([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$FailureMessage) {
@@ -115,17 +132,22 @@ function Wait-Condition([scriptblock]$Condition, [int]$TimeoutSeconds, [string]$
 function Wait-ExplorerStable([int]$TimeoutSeconds = 20) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $stableSince = $null
+    $stableProcessId = 0
     do {
-        $count = @(Get-ExplorerProcesses).Count
-        if ($count -eq 1 -and (Test-ShellTrayPresent)) {
-            if ($null -eq $stableSince) { $stableSince = [DateTime]::UtcNow }
+        try { $processId = Get-ExplorerCoreProcessId } catch { $processId = 0 }
+        if ($processId -gt 0) {
+            if ($null -eq $stableSince -or $stableProcessId -ne $processId) {
+                $stableSince = [DateTime]::UtcNow
+                $stableProcessId = $processId
+            }
             elseif (([DateTime]::UtcNow - $stableSince).TotalSeconds -ge 2) { return }
         } else {
             $stableSince = $null
+            $stableProcessId = 0
         }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Explorer no quedó estable como proceso único dentro del plazo."
+    throw "Explorer no mantuvo un Shell_TrayWnd con propietario identificable y estable dentro del plazo."
 }
 
 function Wait-TenchyShellReady([Diagnostics.Process]$Process, [int]$TimeoutSeconds = 35) {
@@ -134,8 +156,9 @@ function Wait-TenchyShellReady([Diagnostics.Process]$Process, [int]$TimeoutSecon
         if ($Process.HasExited) {
             throw "TenchyShell terminó antes de alcanzar el estado sin Explorer (código $($Process.ExitCode))."
         }
-        if (@(Get-TenchyShellProcesses).Count -eq 1 -and
-            -not (Test-ShellTrayPresent)) {
+        $ownedProcess = Get-Process -Id $Process.Id -ErrorAction SilentlyContinue
+        if ($null -ne $ownedProcess -and $ownedProcess.SessionId -eq $benchmarkSessionId -and
+            $ownedProcess.ProcessName -eq "TenchyShell" -and -not (Test-ShellTrayPresent)) {
             return
         }
         Start-Sleep -Milliseconds 100
@@ -150,8 +173,8 @@ function Get-NextOfficialCapture {
         foreach ($file in @(Get-ChildItem -LiteralPath $batchPath -Filter "*.json" -File)) {
             try { $data = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json }
             catch { throw "El lote contiene un JSON ilegible: $($file.FullName). $($_.Exception.Message)" }
-            if ([int]$data.schemaVersion -ne 2 -or -not [bool]$data.official) {
-                throw "El lote oficial contiene un archivo que no es una captura oficial de esquema 2: $($file.FullName)."
+            if ([int]$data.schemaVersion -ne 3 -or -not [bool]$data.official) {
+                throw "El lote oficial contiene un archivo que no es una captura oficial de esquema 3: $($file.FullName)."
             }
             if ([string]$data.batchId -ne $BatchId) {
                 throw "El lote contiene una captura con BatchId incompatible: $($file.FullName)."
@@ -220,21 +243,21 @@ function Read-ReleaseManifest {
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) { throw "No se pudo identificar el commit actual." }
     $dirty = [bool](& git -c "safe.directory=$safeRepoRoot" -C $repoRoot status --porcelain 2>$null)
     if (-not $SmokeTest -and $dirty) { throw "El benchmark oficial requiere un árbol Git limpio." }
-    if ([string]$manifest.gitCommit -ne [string]$commit -or [bool]$manifest.gitDirty) {
-        throw "La publicación no corresponde al commit limpio actual. Ejecuta .\scripts\publish.ps1 después del commit."
+    if ([string]$manifest.gitCommit -ne [string]$commit) {
+        throw "La publicación no corresponde al commit actual. Ejecuta .\scripts\publish.ps1 para actualizarla."
+    }
+    if (-not $SmokeTest -and [bool]$manifest.gitDirty) {
+        throw "La publicación oficial no procede de un árbol Git limpio. Ejecuta .\scripts\publish.ps1 después del commit."
     }
     return $manifest
 }
 
 function Start-IdleTools {
     $existing = Get-ToolProcesses
-    if ($existing.Count -gt 0) {
-        throw "Idle automatizado requiere comenzar sin WezTerm/Yazi; se encontraron: $($existing.ProcessName -join ', ')."
-    }
     $initialIds = @($existing.Id)
     Start-Process -FilePath "wezterm-gui.exe" -ArgumentList @("start", "--always-new-process", "--class", "TenchyShellBenchmarkIdle", "--", "yazi.exe") | Out-Null
     Wait-Condition {
-        $tools = Get-ToolProcesses
+        $tools = @(Get-ToolProcesses | Where-Object { $_.Id -notin $initialIds })
         @($tools | Where-Object ProcessName -eq "yazi").Count -ge 1 -and
             @($tools | Where-Object { $_.ProcessName -in @("wezterm", "wezterm-gui") }).Count -ge 1
     } 15 "No aparecieron WezTerm y Yazi dentro del tiempo esperado."
@@ -244,27 +267,71 @@ function Start-IdleTools {
 function Close-OwnedToolsNormally([int[]]$InitialIds) {
     $owned = @(Get-ToolProcesses | Where-Object { $_.Id -notin $InitialIds })
     $windows = @($owned | Where-Object {
-        $_.ProcessName -in @("wezterm", "wezterm-gui") -and $_.MainWindowHandle -ne [IntPtr]::Zero
+        if ($_.ProcessName -notin @("wezterm", "wezterm-gui") -or $_.MainWindowHandle -eq [IntPtr]::Zero) {
+            return $false
+        }
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue
+        return $null -ne $cim -and [string]$cim.CommandLine -match "--class\s+TenchyShellBenchmarkIdle"
     })
+    if ($windows.Count -eq 0) {
+        return
+    }
     if ($windows.Count -ne 1) {
         throw "Se esperaba una ventana propia de WezTerm para cerrar Yazi y se encontraron $($windows.Count)."
     }
     if (-not [TenchyShellPerformanceOrchestratorInput]::TrySendQuit($windows[0].MainWindowHandle)) {
-        throw "No se pudo enfocar exclusivamente la ventana propia de WezTerm para solicitar 'q'."
+        if (-not $windows[0].CloseMainWindow()) {
+            throw "No se pudo enfocar exclusivamente la ventana propia de WezTerm para solicitar 'q'."
+        }
     }
-    Wait-Condition {
-        @(Get-ToolProcesses | Where-Object { $_.Id -notin $InitialIds }).Count -eq 0
-    } 10 "WezTerm/Yazi no terminó normalmente; no se forzó el cierre de procesos."
+    $targetRootIds = @($windows.Id)
+    $targetIds = @($targetRootIds) + @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ParentProcessId -in $targetRootIds } | Select-Object -ExpandProperty ProcessId)
+    try {
+        Wait-Condition {
+            @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.ProcessId -in $targetIds }).Count -eq 0
+        } 10 "WezTerm/Yazi no terminó normalmente; no se forzó el cierre de procesos."
+    } catch {
+        if (-not $SmokeTest) { throw }
+        Write-Warning "El workload Idle no aceptó el cierre cooperativo; se limpiarán únicamente sus PIDs de prueba ($($targetIds -join ', '))."
+        foreach ($targetId in $targetIds) {
+            try { Stop-Process -Id ([int]$targetId) -Force -ErrorAction SilentlyContinue } catch { }
+        }
+        try {
+            Wait-Condition {
+                @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ProcessId -in $targetIds }).Count -eq 0
+            } 10 ""
+        } catch { }
+    }
 }
 
-function Set-CaptureOrchestration([string]$Path, $Manifest, [bool]$IdleManaged, [string[]]$Errors) {
+function Stop-TestOwnedProcesses([int[]]$ProtectedIds) {
+    $escapedShell = [Regex]::Escape($shellExecutable)
+    $owned = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ProcessId -notin $ProtectedIds -and
+        [string]$_.CommandLine -match $escapedShell
+    } | Sort-Object ProcessId -Descending)
+    foreach ($process in $owned) {
+        try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+function Set-CaptureOrchestration(
+    [string]$Path,
+    $Manifest,
+    [bool]$IdleManaged,
+    [bool]$LiveTelemetryUnchanged,
+    [string[]]$Errors) {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
     $data = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
     $data | Add-Member -NotePropertyName orchestration -NotePropertyValue ([pscustomobject]@{
         mode = "Automated"
-        version = 1
+        version = 2
         shellLifecycleManaged = $data.scenario -eq "TenchyShell"
         idleToolManaged = $IdleManaged
+        liveTelemetryUnchanged = $LiveTelemetryUnchanged
         releaseGitCommit = [string]$Manifest.gitCommit
         completed = $Errors.Count -eq 0
         errors = @($Errors)
@@ -274,6 +341,25 @@ function Set-CaptureOrchestration([string]$Path, $Manifest, [bool]$IdleManaged, 
         $data.invalidReasons = @($data.invalidReasons) + @($Errors)
     }
     $data | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $Path -Encoding utf8
+}
+
+function Get-LiveTelemetrySnapshot {
+    $snapshot = @{}
+    if (Test-Path -LiteralPath $liveBenchmarkDirectory -PathType Container) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $liveBenchmarkDirectory -Filter "live-*.jsonl" -File)) {
+            $null = $snapshot[$file.FullName] = [long]$file.Length
+        }
+    }
+    Write-Output -NoEnumerate -InputObject $snapshot
+}
+
+function Test-LiveTelemetryUnchanged([hashtable]$Before) {
+    $after = Get-LiveTelemetrySnapshot
+    if ($Before.Count -ne $after.Count) { return $false }
+    foreach ($path in $Before.Keys) {
+        if (-not (@($after.Keys) -contains $path) -or [long]$after[$path] -ne [long]$Before[$path]) { return $false }
+    }
+    return $true
 }
 
 function Ensure-ExplorerRecovery {
@@ -287,12 +373,15 @@ function Ensure-ExplorerRecovery {
 function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
     $settings = Get-CaptureSettings $Phase
     $collectorDuration = Get-CollectorDurationSeconds $settings
-    $shellExitAfterSeconds = [Math]::Min(3600, $StabilizationSeconds + $collectorDuration + 15)
+    $shellExitAfterSeconds = [Math]::Min(3600, $StabilizationSeconds + $collectorDuration + 60)
     $shellProcess = $null
     $idleInitialIds = @()
+    $protectedToolIds = @()
     $idleManaged = $false
     $newCapturePath = $null
     $errors = [Collections.Generic.List[string]]::new()
+    $liveTelemetryBefore = Get-LiveTelemetrySnapshot
+    $liveTelemetryUnchanged = $true
     $logOffset = if (Test-Path -LiteralPath $logPath -PathType Leaf) { (Get-Content -LiteralPath $logPath -Raw -Encoding UTF8).Length } else { 0 }
     $outputDirectory = if ($SmokeTest) { $benchmarkRoot } else { Join-Path $benchmarkRoot $BatchId }
     if (-not (Test-Path -LiteralPath $outputDirectory -PathType Container)) {
@@ -302,7 +391,15 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
 
     try {
         $tools = Get-ToolProcesses
-        if ($tools.Count -gt 0) { throw "La captura debe comenzar sin WezTerm/Yazi; encontrados: $($tools.ProcessName -join ', ')." }
+        $excludedProcessIds = @($tools.Id)
+        $protectedToolIds = $excludedProcessIds
+        if ($tools.Count -gt 0) {
+            if ($SmokeTest) {
+                Write-Warning "El smoke test excluirá del lote los procesos WezTerm/Yazi ya abiertos: $($tools.ProcessName -join ', ')."
+            } else {
+                throw "La captura oficial debe comenzar sin WezTerm/Yazi; encontrados: $($tools.ProcessName -join ', ')."
+            }
+        }
         $voluntary = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
             $_.SessionId -eq $benchmarkSessionId -and
                 $voluntaryProcessNames -contains $_.ProcessName.ToLowerInvariant()
@@ -346,6 +443,8 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
         $measureArguments = @{
             Scenario = $Scenario
             Phase = $Phase
+            MainProcessId = if ($Scenario -eq "TenchyShell") { [int]$shellProcess.Id } else { Get-ExplorerCoreProcessId }
+            ExcludedProcessIds = $excludedProcessIds
             Repetitions = $settings.Repetitions
             SamplesPerRepetition = $settings.SamplesPerRepetition
             IntervalMilliseconds = $settings.IntervalMilliseconds
@@ -356,7 +455,11 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
             WorkflowVerifyClosedSecond = $settings.WorkflowVerifyClosedSecond
             StressActionSeconds = $settings.StressActionSeconds
         }
-        if ($SmokeTest) { $measureArguments.SmokeTest = $true }
+        if ($SmokeTest) {
+            $measureArguments.SmokeTest = $true
+            $measureArguments.AllowExistingToolsForSmoke = $true
+            if ($Phase -eq "TenchyShellStress") { $measureArguments.ManualStressActions = $true }
+        }
         else { $measureArguments.BatchId = $BatchId }
 
         try { & $measureScript @measureArguments }
@@ -373,7 +476,7 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
         }
 
         if ($Scenario -eq "TenchyShell") {
-            if (-not $shellProcess.WaitForExit(30000)) {
+            if (-not $shellProcess.WaitForExit([Math]::Min(120000, ($shellExitAfterSeconds + 15) * 1000))) {
                 $errors.Add("TenchyShell no terminó limpiamente dentro del plazo acotado.")
             } elseif ($shellProcess.ExitCode -ne 0) {
                 $errors.Add("TenchyShell terminó con código $($shellProcess.ExitCode).")
@@ -393,11 +496,11 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
     } catch {
         $errors.Add($_.Exception.Message)
     } finally {
-        $cleanupInitialIds = if ($idleManaged) { $idleInitialIds } else { @() }
+        $cleanupInitialIds = $protectedToolIds
         if (@(Get-ToolProcesses | Where-Object { $_.Id -notin $cleanupInitialIds }).Count -gt 0) {
             try { Close-OwnedToolsNormally $cleanupInitialIds }
             catch {
-                if (-not $errors.Contains($_.Exception.Message)) { $errors.Add($_.Exception.Message) }
+                if (-not (@($errors) -contains $_.Exception.Message)) { [void]$errors.Add($_.Exception.Message) }
             }
         }
         if ($null -ne $shellProcess -and -not $shellProcess.HasExited) {
@@ -409,9 +512,15 @@ function Invoke-AutomatedCapture([string]$Scenario, [string]$Phase, $Manifest) {
                 $errors.Add("No se pudo cerrar el proceso TenchyShell propio durante la recuperación: $($_.Exception.Message)")
             }
         }
+        Stop-TestOwnedProcesses $protectedToolIds
+        $liveTelemetryUnchanged = Test-LiveTelemetryUnchanged $liveTelemetryBefore
+        if ($Scenario -eq "TenchyShell" -and -not $liveTelemetryUnchanged) {
+            $liveTelemetryError = "--automated-benchmark creó o amplió archivos de telemetría live."
+            if (-not (@($errors) -contains $liveTelemetryError)) { [void]$errors.Add($liveTelemetryError) }
+        }
         try { Ensure-ExplorerRecovery }
         catch { $errors.Add($_.Exception.Message) }
-        Set-CaptureOrchestration $newCapturePath $Manifest $idleManaged @($errors)
+        Set-CaptureOrchestration $newCapturePath $Manifest $idleManaged $liveTelemetryUnchanged @($errors)
         if ($null -ne $shellProcess) { $shellProcess.Dispose() }
     }
 

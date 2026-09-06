@@ -40,6 +40,7 @@ desde una terminal. Conserva una terminal funcional antes de detener Explorer.
 | `%LOCALAPPDATA%\TenchyShell\logs` | Logs de shell y bridge. |
 | `%LOCALAPPDATA%\TenchyShell\state` | Fondo, migración y caché temporal de iconos. |
 | `%LOCALAPPDATA%\TenchyShell\benchmarks\live` | Telemetría de benchmark, con posible información sensible. |
+| `%LOCALAPPDATA%\TenchyShell\diagnostics` | ETL y salidas de diagnóstico local de activación MSIX; pueden incluir rutas, PID y actividad de la sesión. |
 
 Revisa estos datos antes de compartirlos y retíralos deliberadamente si ya no
 los necesitas.

@@ -17,6 +17,11 @@ command = ""
 [applications]
 browser = "msedge.exe"
 
+[OPTIONALS]
+# Superficies opcionales de TenchyShell. Reinicia el shell tras modificar estos valores.
+dock = true
+application_search = true
+
 [status_panel]
 enabled = true
 hotkey = "Ctrl+Alt+S"
@@ -66,6 +71,38 @@ max_storage_mb = 256
 # Requiere instalar y autorizar el bridge MSIX opcional de notificaciones.
 [notifications]
 enabled = false
+
+# API local opcional para YASB. Usa un Named Pipe sólo del usuario actual.
+[api]
+enabled = true
+
+# TUI integrada. Usa --without-tui para diagnóstico o recuperación.
+[tui]
+enabled = true
+title = "TenchyShell"
+
+[[tui.widgets]]
+id = "terminal"
+title = "Terminal configurado"
+type = "configuration"
+source = "terminal.command"
+
+[[tui.widgets]]
+id = "hint"
+title = "Atajo de terminal"
+type = "configuration"
+source = "hotkeys.terminal"
+
+# Ejemplo seguro de comando externo, ejecutado sólo al actualizar el widget.
+# [[tui.widgets]]
+# id = "branch"
+# title = "Rama Git"
+# type = "command"
+# command = "git.exe"
+# arguments = ["-C", ".", "branch", "--show-current"]
+# timeout_ms = 1500
+# max_output_bytes = 4096
+# update_ms = 0
 
 # Los elementos definidos aquí sustituyen la lista integrada de ejemplo.
 # Un elemento sin command es estático; uno con command se actualiza mediante JSON.
@@ -189,3 +226,41 @@ zone_8 = "Ctrl+Win+8"
 zone_9 = "Ctrl+Win+9"
 # Modificadores usados durante el arrastre para mostrar el overlay.
 drag_modifier = "Ctrl+Shift"
+
+# Opcional: si se omite [dock] se conserva el catálogo integrado.
+[dock]
+enabled = true
+
+[[dock.categories]]
+id = "equipo"
+title = "Equipo"
+order = 10
+visible = true
+
+[[dock.categories.items]]
+id = "network"
+title = "Red"
+action = "network"
+visible = true
+
+[[dock.categories]]
+id = "aplicaciones"
+title = "Aplicaciones"
+order = 20
+visible = true
+
+[[dock.categories.items]]
+id = "terminal"
+title = "Terminal"
+action = "terminal"
+
+[[dock.categories]]
+id = "sesion"
+title = "Sesión"
+order = 30
+visible = true
+
+[[dock.categories.items]]
+id = "shutdown"
+title = "Apagar"
+action = "shutdown"

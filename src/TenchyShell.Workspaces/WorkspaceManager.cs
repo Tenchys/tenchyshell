@@ -20,8 +20,15 @@ public sealed class WorkspaceManager : IWorkspaceWindowSource
 
     public int CurrentWorkspace => currentWorkspace;
 
+    public event EventHandler? StateChanged;
+
     public IReadOnlyList<IntPtr> GetCurrentWorkspaceWindows() =>
         windowsByWorkspace[currentWorkspace].ToArray();
+
+    public IReadOnlyDictionary<int, IReadOnlyList<IntPtr>> GetAllWorkspaceWindows() =>
+        windowsByWorkspace.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<IntPtr>)pair.Value.ToArray());
 
     public void Refresh()
     {
@@ -67,6 +74,8 @@ public sealed class WorkspaceManager : IWorkspaceWindowSource
             windowService.Focus(foregroundWindow);
         }
 
+        StateChanged?.Invoke(this, EventArgs.Empty);
+
         return WorkspaceOperationResult.Success();
     }
 
@@ -100,6 +109,8 @@ public sealed class WorkspaceManager : IWorkspaceWindowSource
         {
             windowService.SetVisible(foregroundWindow, visible: false);
         }
+
+        StateChanged?.Invoke(this, EventArgs.Empty);
 
         return WorkspaceOperationResult.Success();
     }

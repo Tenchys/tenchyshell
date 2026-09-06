@@ -42,7 +42,7 @@ Verificar que existan `publish/TenchyShell/Debug/win-x64/TenchyShell.dll`, `publ
 - [ ] En un usuario secundario o VM, ejecutar el perfil publicado con `--without-explorer`, recuperar Explorer con `Ctrl+Alt+Shift+E` y confirmar que Winlogon no cambia.
 - [ ] Conservar URL de CI, checksum, salida de `--check` y resultados de la sesión aislada antes de eliminar el release y tag temporales.
 
-## Consolidación y rendimiento — Hito 0.7.6
+## Consolidación y rendimiento — Hitos 0.7.6 y 0.8.7
 
 - [ ] Con una copia de prueba en `%LOCALAPPDATA%\MinimalShell`, iniciar
   TenchyShell y confirmar que los perfiles conocidos, el estado válido del
@@ -54,9 +54,15 @@ Verificar que existan `publish/TenchyShell/Debug/win-x64/TenchyShell.dll`, `publ
 - [ ] Abrir la bandeja y confirmar que aparece inmediatamente con `Red` en
   estado de consulta; la enumeración WLAN se completa después sin congelar el
   teclado, el mouse ni el message loop.
-- [ ] Ejecutar las cuatro mediciones descritas en `docs/PERFORMANCE.md`, con
+- [ ] Antes del Día 0, publicar Release desde un árbol limpio, ejecutar la suite,
+  `scripts/test-performance.ps1` y los smoke tests `Idle`, `CommonWorkflow` y
+  `TenchyShellStress`; comprobar cierre limpio y restauración de Explorer.
+- [ ] Ejecutar las cinco mediciones v3 descritas en `docs/PERFORMANCE.md`, con
   cinco repeticiones por escenario y fase, y generar `summary.md` fuera del
   repositorio.
+- [ ] Confirmar que `summary.md` muestra `Core`, `ShellSession` y el observador,
+  que el PID del observador no participa en ningún agregado y que el modo
+  automatizado no crea ni amplía archivos de telemetría live.
 - [ ] Anotar hardware, build de Windows, commit, estado del árbol, procesos
   incluidos, muestras descartadas y limitaciones antes de comparar medianas.
 
@@ -110,6 +116,35 @@ dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-exp
 - [ ] Pulsar `Ctrl+Alt+T`; confirmar que no inicia Explorer, muestra la bandeja propia y se cierra con `Escape`.
 - [ ] Con dos distribuciones ya habilitadas, abrir `Idioma` desde la bandeja, cambiar la selección y escribir en Notepad o WezTerm; comprobar que funciona sin Explorer y que `Ctrl+Alt+Shift+E` sigue recuperándolo.
 - [ ] Cerrar TenchyShell con `Ctrl+C` y restaurar la sesión normal.
+
+## Hito 0.8.4 — Diagnóstico comparativo MSIX/UWP
+
+En una VM o usuario secundario que ya se encuentre sin Explorer, obtén los AUMID
+reales de Configuración y Calculadora con `Get-StartApps`, compila el binario y
+ejecuta la comparación ETW:
+
+```powershell
+.\scripts\trace-packaged-activation-dependency.ps1 `
+  -TenchyShellPath .\src\TenchyShell.App\bin\Debug\net10.0-windows\TenchyShell.exe `
+  -ConfigurationPath .\config\TenchyShell.without-explorer.example.toml `
+  -AppUserModelId '<AUMID-Configuracion>', '<AUMID-Calculadora>' `
+  -AcknowledgeIsolatedSession
+```
+
+El script crea un perfil WPR temporal en `%TEMP%` y deja los dos ETL, la salida
+de consola y un resumen JSON en `%LOCALAPPDATA%\TenchyShell\diagnostics`. Se
+niega a funcionar si la sesión ya tiene `Shell_TrayWnd` o un `explorer.exe`
+residual. El escenario B inicia Explorer explícitamente; su `finally` lo cierra
+de forma cooperativa mediante TenchyShell.
+
+- [ ] El resumen confirma `Shell_TrayWnd` ausente antes y después del ETL `without-explorer`.
+- [ ] El resumen confirma `Shell_TrayWnd` presente antes y después del ETL `with-explorer`.
+- [ ] Ambos ETL contienen la misma matriz: Configuración y Calculadora con `in-process` y `local-server`.
+- [ ] En WPA, correlacionar el hilo bloqueado en `ActivateApplication` con COM/RPC, CLSID y PID/imagen del servidor esperado.
+- [ ] Declarar dependencia directa de Explorer solo si el destino es `explorer.exe` o un servidor COM alojado explícitamente por Explorer y el escenario B elimina la espera.
+- [ ] Si el destino es `RuntimeBroker.exe`, `dllhost.exe`, `svchost.exe` u otro proceso, documentar la dependencia de ese broker o componente de sesión, no de Explorer.
+- [ ] Si B funciona pero WPA no identifica el servidor, documentar solo una dependencia del entorno iniciado por Explorer.
+- [ ] Tras documentar la conclusión, eliminar los ETL locales por contener rutas, PID y actividad de la sesión.
 
 ## Acciones destructivas
 

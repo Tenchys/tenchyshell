@@ -6,47 +6,75 @@ $summarizer = Join-Path $PSScriptRoot "summarize-performance.ps1"
 $orchestrator = Join-Path $PSScriptRoot "invoke-performance-benchmark.ps1"
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("TenchyShell.Performance.Tests." + [Guid]::NewGuid().ToString("N"))
 
-function New-Sample([string]$Scenario, [double]$ShellCpu, [double]$ToolCpu, [int]$ShellCount = 1) {
-    $shellName = if ($Scenario -eq "Explorer") { "explorer" } else { "TenchyShell" }
-    $shell = [ordered]@{
-        processCount = $ShellCount
-        cpuPercent = $ShellCpu
-        privateBytes = 100MB
-        workingSetBytes = 80MB
-        handles = 100
-        threads = 10
-        readBytesPerSecond = 0
-        writeBytesPerSecond = 0
+function Get-SyntheticTotals($Rows) {
+    $items = @($Rows)
+    $cpu = @($items | Where-Object { $null -ne $_.cpuPercent } | ForEach-Object cpuPercent)
+    return [ordered]@{
+        processCount = $items.Count
+        cpuPercent = if ($cpu.Count -eq 0) { $null } else { [double](($cpu | Measure-Object -Sum).Sum) }
+        privateBytes = [long](($items | ForEach-Object { [long]$_.privateBytes } | Measure-Object -Sum).Sum)
+        workingSetBytes = [long](($items | ForEach-Object { [long]$_.workingSetBytes } | Measure-Object -Sum).Sum)
+        handles = [int](($items | ForEach-Object { [int]$_.handles } | Measure-Object -Sum).Sum)
+        threads = [int](($items | ForEach-Object { [int]$_.threads } | Measure-Object -Sum).Sum)
+        readBytesPerSecond = if ($items.Count -eq 0) { $null } else { [double](($items | ForEach-Object { [double]$_.readBytesPerSecond } | Measure-Object -Sum).Sum) }
+        writeBytesPerSecond = if ($items.Count -eq 0) { $null } else { [double](($items | ForEach-Object { [double]$_.writeBytesPerSecond } | Measure-Object -Sum).Sum) }
     }
-    $tool = [ordered]@{
-        processCount = 1
-        cpuPercent = $ToolCpu
-        privateBytes = 50MB
-        workingSetBytes = 40MB
-        handles = 50
-        threads = 5
+}
+
+function New-ProcessRow([int]$Id, [int]$ParentId, [string]$Name, [string]$Role, [double]$Cpu, [long]$PrivateBytes) {
+    return [ordered]@{
+        id = $Id
+        parentId = $ParentId
+        name = $Name
+        role = $Role
+        cpuPercent = $Cpu
+        privateBytes = $PrivateBytes
+        workingSetBytes = [long]($PrivateBytes * 0.8)
+        handles = 10
+        threads = 2
         readBytesPerSecond = 1MB
         writeBytesPerSecond = 0.5MB
+        startTime = "2026-01-01T00:00:00.0000000Z"
     }
-    $total = [ordered]@{
-        processCount = $ShellCount + 1
-        cpuPercent = $ShellCpu + $ToolCpu
-        privateBytes = 150MB
-        workingSetBytes = 120MB
-        handles = 150
-        threads = 15
-        readBytesPerSecond = 1MB
-        writeBytesPerSecond = 0.5MB
+}
+
+function New-Sample([string]$Scenario, [double]$CoreCpu, [double]$ToolCpu, [int]$CoreCount = 1) {
+    $coreName = if ($Scenario -eq "Explorer") { "explorer" } else { "TenchyShell" }
+    $processes = @()
+    for ($index = 0; $index -lt $CoreCount; $index++) {
+        $processes += New-ProcessRow (10 + $index) 1 $coreName "Core" $CoreCpu 100MB
     }
+    if ($Scenario -eq "TenchyShell") {
+        $processes += New-ProcessRow 11 10 "wezterm-gui" "Auxiliary" 0.5 30MB
+        $processes += New-ProcessRow 12 11 "TenchyShell" "Auxiliary" 0.25 20MB
+        $processes += New-ProcessRow 13 4 "TenchyShell.NotificationBridge" "Auxiliary" 0.25 15MB
+    }
+    $processes += New-ProcessRow 20 99 "wezterm-gui" "Tool" $ToolCpu 50MB
+    $processes += New-ProcessRow 21 20 "yazi" "Tool" 0.5 25MB
+    $coreRows = @($processes | Where-Object role -eq "Core")
+    $auxiliaryRows = @($processes | Where-Object role -eq "Auxiliary")
+    $toolRows = @($processes | Where-Object role -eq "Tool")
     return [ordered]@{
         capturedAt = (Get-Date).ToUniversalTime().ToString("O")
-        shellProcessCount = $ShellCount
+        mainProcessId = 10
+        coreProcessCount = $CoreCount
         contaminationDetected = $false
-        processes = @(
-            [ordered]@{ id = 10; name = $shellName; role = "Shell" },
-            [ordered]@{ id = 20; name = "yazi"; role = "Tool" }
-        )
-        totalsByRole = [ordered]@{ Shell = $shell; Tool = $tool; Total = $total }
+        processes = @($processes)
+        totalsByRole = [ordered]@{
+            Core = Get-SyntheticTotals $coreRows
+            Auxiliary = Get-SyntheticTotals $auxiliaryRows
+            ShellSession = Get-SyntheticTotals @($coreRows + $auxiliaryRows)
+            Tool = Get-SyntheticTotals $toolRows
+            Total = Get-SyntheticTotals @($coreRows + $auxiliaryRows + $toolRows)
+        }
+        observer = [ordered]@{
+            processId = 99
+            cpuPercent = 0.2
+            totalProcessorMilliseconds = 100
+            privateBytes = 40MB
+            workingSetBytes = 32MB
+            samplingDurationMilliseconds = 12.5
+        }
     }
 }
 
@@ -66,7 +94,7 @@ function New-Capture([string]$Scenario, [string]$Phase, [bool]$Official = $true)
         }
     }
     return [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         batchId = if ($Official) { "synthetic-official" } else { "" }
         official = $Official
         valid = $true
@@ -105,12 +133,26 @@ function New-Capture([string]$Scenario, [string]$Phase, [bool]$Official = $true)
         }
         orchestration = [ordered]@{
             mode = "Automated"
-            version = 1
+            version = 2
             shellLifecycleManaged = $Scenario -eq "TenchyShell"
             idleToolManaged = $Phase -eq "Idle"
+            liveTelemetryUnchanged = $true
             releaseGitCommit = "0123456789012345678901234567890123456789"
             completed = $true
             errors = @()
+        }
+        processPolicy = [ordered]@{
+            mainProcessId = 10
+            mainProcessStartedAt = "2026-01-01T00:00:00.0000000Z"
+            expectedCoreNames = if ($Scenario -eq "Explorer") { @("explorer") } else { @("tenchyshell", "minimalshell") }
+            sessionId = 1
+        }
+        observer = [ordered]@{
+            processId = 99
+            sessionId = 1
+            processName = "pwsh"
+            collector = "PowerShell/Get-CimInstance Win32_Process"
+            excludedFromAggregates = $true
         }
         runs = $runs
     }
@@ -149,22 +191,33 @@ try {
     $summaryPath = Join-Path $testRoot "summary.md"
     & $summarizer -InputPath $validDirectory -OutputPath $summaryPath
     $summary = Get-Content -Raw -LiteralPath $summaryPath
-    if ($summary -notmatch "Deltas TenchyShell" -or $summary -notmatch "Resultados por repeticion" -or $summary -notmatch "N/D") {
-        throw "El resumen sintetico no contiene deltas, repeticiones y manejo del denominador cero."
+    if ($summary -notmatch "Deltas TenchyShell" -or $summary -notmatch "Resultados por repeticion" -or
+        $summary -notmatch "Observador PowerShell/CIM" -or $summary -notmatch "ShellSession" -or $summary -notmatch "N/D") {
+        throw "El resumen sintetico no contiene Core/ShellSession, observador, deltas, repeticiones y manejo del denominador cero."
     }
 
     $invalidDirectory = Join-Path $testRoot "invalid"
-    $schema1 = New-Capture "TenchyShell" "Idle" $false
-    $schema1.schemaVersion = 1
-    $schema1Path = Write-Capture $invalidDirectory "schema1" $schema1
-    Assert-Throws { & $summarizer -InputPath $schema1Path -AllowSmokeTest } "esquema 2"
+    $schema2 = New-Capture "TenchyShell" "Idle" $false
+    $schema2.schemaVersion = 2
+    $schema2Path = Write-Capture $invalidDirectory "schema2" $schema2
+    Assert-Throws { & $summarizer -InputPath $schema2Path -AllowSmokeTest } "esquema 3"
 
-    foreach ($shellCount in @(0, 2)) {
-        $invalidShell = New-Capture "TenchyShell" "Idle" $false
-        $invalidShell.runs[0].samples[0] = New-Sample "TenchyShell" 1 1 $shellCount
-        $path = Write-Capture $invalidDirectory "shell-$shellCount" $invalidShell
-        Assert-Throws { & $summarizer -InputPath $path -AllowSmokeTest } "exactamente una shell"
+    foreach ($coreCount in @(0, 2)) {
+        $invalidCore = New-Capture "TenchyShell" "Idle" $false
+        $invalidCore.runs[0].samples[0] = New-Sample "TenchyShell" 1 1 $coreCount
+        $path = Write-Capture $invalidDirectory "core-$coreCount" $invalidCore
+        Assert-Throws { & $summarizer -InputPath $path -AllowSmokeTest } "PID principal"
     }
+
+    $wrongSum = New-Capture "TenchyShell" "Idle" $false
+    $wrongSum.runs[0].samples[0].totalsByRole.ShellSession.privateBytes++
+    $wrongSumPath = Write-Capture $invalidDirectory "wrong-sum" $wrongSum
+    Assert-Throws { & $summarizer -InputPath $wrongSumPath -AllowSmokeTest } "suma exacta"
+
+    $observerIncluded = New-Capture "TenchyShell" "Idle" $false
+    $observerIncluded.runs[0].samples[0].processes += New-ProcessRow 99 1 "pwsh" "Tool" 0.2 40MB
+    $observerIncludedPath = Write-Capture $invalidDirectory "observer-included" $observerIncluded
+    Assert-Throws { & $summarizer -InputPath $observerIncludedPath -AllowSmokeTest } "observador"
 
     $incomplete = New-Capture "TenchyShell" "Idle" $false
     $incomplete.runs[0].samples = @($incomplete.runs[0].samples[0])
@@ -230,6 +283,29 @@ try {
         throw "El plan oficial automatizado no comienza con Explorer/Idle."
     }
     Assert-Throws { & $orchestrator -BatchId "invalid batch" -PlanOnly } "BatchId"
+
+    $legacy = New-Capture "TenchyShell" "Idle" $false
+    $legacy.schemaVersion = 2
+    $legacy.orchestration.version = 1
+    foreach ($run in $legacy.runs) {
+        foreach ($sample in $run.samples) {
+            $legacyProcesses = @($sample.processes | Where-Object { $_.role -in @("Core", "Tool") })
+            foreach ($process in $legacyProcesses) {
+                if ($process.role -eq "Core") { $process.role = "Shell" }
+            }
+            $sample.processes = $legacyProcesses
+            $sample["shellProcessCount"] = 1
+            $sample.totalsByRole = [ordered]@{
+                Shell = Get-SyntheticTotals @($legacyProcesses | Where-Object role -eq "Shell")
+                Tool = Get-SyntheticTotals @($legacyProcesses | Where-Object role -eq "Tool")
+                Total = Get-SyntheticTotals $legacyProcesses
+            }
+        }
+    }
+    $legacyPath = Write-Capture $testRoot "legacy-v2" $legacy
+    $legacySummary = @(& $summarizer -InputPath $legacyPath -AllowSmokeTest -SchemaVersion 2) -join [Environment]::NewLine
+    if ($legacySummary -notmatch "esquema 2") { throw "El resumidor no conservó la lectura separada de lotes v2." }
+    Assert-Throws { & $summarizer -InputPath @($legacyPath, $schema2Path) -AllowSmokeTest } "esquema 2"
 
     Write-Host "Instrumental de rendimiento: pruebas sinteticas y negativas superadas."
 } finally {

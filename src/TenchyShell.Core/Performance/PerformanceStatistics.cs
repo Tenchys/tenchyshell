@@ -78,7 +78,7 @@ public static class PerformanceCaptureValidator
     {
         ArgumentNullException.ThrowIfNull(metadata);
         var errors = new List<string>();
-        if (metadata.SchemaVersion != 2) errors.Add("schemaVersion debe ser 2.");
+        if (metadata.SchemaVersion != 3) errors.Add("schemaVersion debe ser 3.");
         if (!Enum.TryParse<PerformanceScenario>(metadata.Scenario, ignoreCase: true, out _)) errors.Add("scenario no es válido.");
         if (!Enum.TryParse<PerformancePhase>(metadata.Phase, ignoreCase: true, out var phase))
         {

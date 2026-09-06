@@ -12,5 +12,6 @@
     <ProjectReference Include="..\TenchyShell.Core\TenchyShell.Core.csproj" />
     <ProjectReference Include="..\TenchyShell.Win32\TenchyShell.Win32.csproj" />
     <ProjectReference Include="..\TenchyShell.Workspaces\TenchyShell.Workspaces.csproj" />
+    <ProjectReference Include="..\TenchyShell.Tui\TenchyShell.Tui.csproj" />
   </ItemGroup>
 </Project>

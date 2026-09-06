@@ -22,6 +22,7 @@ Microsoft.NET.Test.Sdk, xUnit y su runner.
 | `test-installer.ps1` | Pruebas Pester del bootstrapper. |
 | `invoke-performance-benchmark.ps1` | Ejecuta la medición reproducible. |
 | `measure-performance.ps1`, `summarize-performance.ps1`, `test-performance.ps1` | Recolección, resumen y validación de rendimiento. |
+| `summarize-live-telemetry.ps1`, `test-live-telemetry-summary.ps1` | Resumen compacto y prueba sintética de telemetría de sesión. |
 | `package-notification-bridge.ps1` | Publica, firma e instala el bridge MSIX de desarrollo. |
 | `package-notification-test-sender.ps1` | Empaqueta el emisor MSIX de integración. |
 | `mouse-battery.example.ps1` | Ejemplo de elemento dinámico de bandeja. |

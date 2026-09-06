@@ -10,7 +10,15 @@ public enum ExplorerShellState
     Ambiguous
 }
 
-public sealed record ExplorerShellExitResult(bool Succeeded, ExplorerShellState State, string Message, int? ProcessId = null);
+public sealed record ExplorerShellExitResult(bool Succeeded, ExplorerShellState State, string Message, int? ProcessId = null)
+{
+    /// <summary>
+    /// Indica si TenchyShell puede continuar sin depender de la superficie de
+    /// Explorer. Un proceso residual sin <c>Shell_TrayWnd</c> no es un shell
+    /// activo y no se termina por la fuerza.
+    /// </summary>
+    public bool CanContinueWithoutExplorer => State is ExplorerShellState.Stopped or ExplorerShellState.ResidualProcess;
+}
 
 /// <summary>
 /// Solicita la salida cooperativa del shell de Explorer en la sesión actual.
@@ -125,6 +133,21 @@ public sealed class ExplorerShellController
             }
 
             var currentTrayProcessId = platform.GetWindowProcessId(currentTrayWindow);
+            if (currentTrayProcessId <= 0)
+            {
+                // During Explorer shutdown a transient Shell_TrayWnd handle can
+                // exist while its owner PID is no longer queryable. Treat it as
+                // an absent tray and keep sampling for the stable shutdown state.
+                absentTraySamples++;
+                if (absentTraySamples >= requiredStableSamples)
+                {
+                    return DescribeAbsentShell(
+                        platform.GetExplorerProcessIds(sessionId),
+                        $"Shell_TrayWnd permaneció sin propietario durante {stablePeriod.TotalSeconds:0.#} s.");
+                }
+
+                continue;
+            }
             if (currentTrayProcessId != initialProcessId)
             {
                 return new ExplorerShellExitResult(

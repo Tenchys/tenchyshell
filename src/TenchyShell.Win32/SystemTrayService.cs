@@ -8,6 +8,7 @@ using TenchyShell.Core.Network;
 using TenchyShell.Core.Notifications;
 using TenchyShell.Core.SystemTray;
 using TenchyShell.Core.Wallpaper;
+using TenchyShell.Core.Windows;
 
 namespace TenchyShell.Win32;
 
@@ -41,6 +42,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     private readonly LiveBenchmarkRecorder? benchmarkRecorder;
     private readonly SystemTrayAutoDismissState autoDismissState = new();
     private readonly NotificationCenter? notificationCenter;
+    private readonly IMinimizedWindowService? minimizedWindowService;
     private readonly List<RuntimeItem> runtimeItems = new();
     private readonly SemaphoreSlim networkRefreshGate = new(1, 1);
     private SystemTrayState state = new(Array.Empty<SystemTrayItem>());
@@ -52,7 +54,10 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     private bool isVisible;
     private bool wallpaperMenuOpen;
     private bool inputLanguageMenuOpen;
+    private bool networkMenuOpen;
     private bool notificationMenuOpen;
+    private bool minimizedWindowsMenuOpen;
+    private MinimizedWindowMenuState minimizedWindowState = new(Array.Empty<MinimizedWindowEntry>(), 0);
     private bool isDisposed;
 
     public SystemTrayService(
@@ -66,7 +71,8 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         MessageLoopHost messageLoop,
         DesktopAreaPolicy? desktopAreaPolicy = null,
         LiveBenchmarkRecorder? benchmarkRecorder = null,
-        NotificationCenter? notificationCenter = null)
+        NotificationCenter? notificationCenter = null,
+        IMinimizedWindowService? minimizedWindowService = null)
     {
         this.shellConfiguration = shellConfiguration;
         configuration = shellConfiguration.SystemTray;
@@ -80,6 +86,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         this.desktopAreaPolicy = desktopAreaPolicy ?? new DesktopAreaPolicy();
         this.benchmarkRecorder = benchmarkRecorder;
         this.notificationCenter = notificationCenter;
+        this.minimizedWindowService = minimizedWindowService;
         if (notificationCenter is not null) notificationCenter.Changed += OnNotificationCenterChanged;
         windowProcedure = WindowProcedure;
         moduleHandle = NativeMethods.GetModuleHandle(null);
@@ -88,6 +95,11 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
     public bool TryOpen(out string? error)
     {
         return TryOpen(openedFromPointer: false, out error);
+    }
+
+    public void Close()
+    {
+        if (!isDisposed && isVisible) Hide();
     }
 
     /// <summary>Abre la bandeja desde una superficie apuntada por el mouse.</summary>
@@ -134,6 +146,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
                 DisableAutoHide();
                 inputLanguageMenuOpen = true;
                 wallpaperMenuOpen = false;
+                minimizedWindowsMenuOpen = false;
                 RefreshInputLanguages();
                 RebuildState();
                 Invalidate();
@@ -144,6 +157,69 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         catch (Exception exception)
         {
             error = $"No se pudo mostrar el selector de idioma: {exception.Message}";
+            logger.Error(error, exception);
+            return false;
+        }
+    }
+
+    public bool TryOpenNetworkMenu(out string? error)
+    {
+        try
+        {
+            ObjectDisposedException.ThrowIf(isDisposed, this);
+            if (!isVisible) Show(networkMenu: true);
+            else
+            {
+                DisableAutoHide();
+                networkMenuOpen = true;
+                wallpaperMenuOpen = false;
+                inputLanguageMenuOpen = false;
+                minimizedWindowsMenuOpen = false;
+                RebuildState();
+                Invalidate();
+                _ = RefreshNetworkAsync();
+            }
+            error = null;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = $"No se pudo mostrar el menú de red: {exception.Message}";
+            logger.Error(error, exception);
+            return false;
+        }
+    }
+
+    public bool TryOpenWallpaperMenu(out string? error) => TryOpenSubmenu(
+        () => wallpaperMenuOpen = true,
+        "fondos",
+        out error);
+
+    public bool TryOpenMinimizedWindowsMenu(out string? error) => TryOpenSubmenu(
+        () => minimizedWindowsMenuOpen = true,
+        "ventanas minimizadas",
+        out error);
+
+    private bool TryOpenSubmenu(Action selectSubmenu, string name, out string? error)
+    {
+        try
+        {
+            ObjectDisposedException.ThrowIf(isDisposed, this);
+            if (!isVisible) Show();
+            DisableAutoHide();
+            wallpaperMenuOpen = false;
+            networkMenuOpen = false;
+            inputLanguageMenuOpen = false;
+            minimizedWindowsMenuOpen = false;
+            selectSubmenu();
+            RebuildState();
+            Invalidate();
+            error = null;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = $"No se pudo mostrar el menú de {name}: {exception.Message}";
             logger.Error(error, exception);
             return false;
         }
@@ -169,12 +245,13 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private void Show(bool inputLanguageMenu = false, bool openedFromPointer = false)
+    private void Show(bool inputLanguageMenu = false, bool openedFromPointer = false, bool networkMenu = false)
     {
         lastForegroundWindow = NativeMethods.GetForegroundWindow();
         EnsureWindow();
         LoadItems();
         inputLanguageMenuOpen = inputLanguageMenu;
+        networkMenuOpen = networkMenu;
         RebuildState();
         var workArea = GetPrimaryWorkArea();
         var dockY = workArea.Top + Math.Max(0, (workArea.Bottom - workArea.Top - shellConfiguration.StatusPanel.Height) / 2);
@@ -214,8 +291,10 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         StopRefreshers();
         runtimeItems.Clear();
         wallpaperMenuOpen = false;
+        networkMenuOpen = false;
         inputLanguageMenuOpen = false;
         notificationMenuOpen = false;
+        minimizedWindowsMenuOpen = false;
 
         var configuredItems = configuration.Items.Count > 0
             ? configuration.Items
@@ -224,6 +303,29 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         foreach (var item in configuredItems)
         {
             runtimeItems.Add(new RuntimeItem(item, CreateSnapshot(item)));
+        }
+
+        if (minimizedWindowService is not null &&
+            !runtimeItems.Any(item => item.Snapshot.Id.Equals("minimized-windows", StringComparison.OrdinalIgnoreCase)))
+        {
+            runtimeItems.Add(new RuntimeItem(
+                new SystemTrayItemConfiguration
+                {
+                    Id = "minimized-windows",
+                    Title = "Ventanas minimizadas",
+                    Text = "Restaurar y enfocar una ventana del workspace actual",
+                    Tooltip = "Ventanas minimizadas del workspace actual"
+                },
+                new SystemTrayItemSnapshot(
+                    "minimized-windows",
+                    "Ventanas minimizadas",
+                    "Consultar ventanas del workspace actual",
+                    "Ventanas minimizadas del workspace actual",
+                    string.Empty,
+                    "ok",
+                    "open",
+                    false,
+                    null)));
         }
 
         if (notificationCenter is not null && !runtimeItems.Any(item => item.Snapshot.Id.Equals("notifications", StringComparison.OrdinalIgnoreCase)))
@@ -377,6 +479,9 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         {
             Text = catalog.Error ?? $"{catalog.Items.Count} imágenes · selecciona una"
         };
+        runtimeItems.Add(new RuntimeItem(
+            new SystemTrayItemConfiguration { Id = "wallpaper:none", Title = "Sin fondo", Text = "[Aplicar]", Tooltip = "Fondo negro sólido" },
+            new SystemTrayItemSnapshot("wallpaper:none", "Sin fondo", "[Aplicar]", "Fondo negro sólido", string.Empty, "ok", "none", false, null)));
         foreach (var item in catalog.Items)
         {
             runtimeItems.Add(new RuntimeItem(
@@ -481,6 +586,38 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
 
     private void RebuildState()
     {
+        if (minimizedWindowsMenuOpen && minimizedWindowService is not null)
+        {
+            try
+            {
+                minimizedWindowState = minimizedWindowService.GetCurrentState();
+            }
+            catch (Exception exception)
+            {
+                minimizedWindowState = new MinimizedWindowMenuState(Array.Empty<MinimizedWindowEntry>(), 0);
+                logger.Error("No se pudo consultar las ventanas minimizadas.", exception);
+            }
+
+            var minimizedItems = minimizedWindowState.Items
+                .Select(entry => new SystemTrayItem(
+                    GetMinimizedWindowItemId(entry.Handle),
+                    entry.Title,
+                    $"Minimizada · Workspace {entry.Workspace}"))
+                .ToList();
+            if (minimizedItems.Count == 0)
+            {
+                minimizedItems.Add(new SystemTrayItem(
+                    "minimized-windows-empty",
+                    "No hay ventanas minimizadas",
+                    "El workspace actual no tiene ventanas para restaurar")
+                {
+                    IconText = "—"
+                });
+            }
+            state = new SystemTrayState(minimizedItems);
+            return;
+        }
+
         if (notificationMenuOpen && notificationCenter is not null)
         {
             var notificationItems = notificationCenter.GetActive()
@@ -489,7 +626,6 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
                     notification.AppName,
                     string.IsNullOrWhiteSpace(notification.Body) ? notification.Title : $"{notification.Title} — {notification.Body}"))
                 .ToList();
-            notificationItems.Add(new SystemTrayItem("notifications-back", "← Notificaciones", "Volver al menú principal"));
             state = new SystemTrayState(notificationItems);
             return;
         }
@@ -504,10 +640,23 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
                     IconText = language.Handle == inputLanguageSnapshot.ActiveHandle ? "*" : "•"
                 })
                 .ToList();
-            languageItems.Add(new SystemTrayItem("input-language-back", "← Idioma", "Volver al menú principal"));
             state = new SystemTrayState(
                 languageItems,
                 $"input-language:{inputLanguageSnapshot.ActiveHandle.ToInt64():X}");
+            return;
+        }
+
+        if (networkMenuOpen)
+        {
+            var networkItems = runtimeItems
+                .Where(item => item.Snapshot.Id.Equals("network", StringComparison.OrdinalIgnoreCase) ||
+                               item.Snapshot.Id.StartsWith("interface:", StringComparison.OrdinalIgnoreCase) ||
+                               item.Snapshot.Id.StartsWith("wifi:", StringComparison.OrdinalIgnoreCase))
+                .Select(runtimeItem => new SystemTrayItem(runtimeItem.Snapshot.Id, runtimeItem.Snapshot.Title, BuildDescription(runtimeItem.Snapshot))
+                {
+                    IconText = GetIconText(runtimeItem.Snapshot)
+                }).ToList();
+            state = new SystemTrayState(networkItems);
             return;
         }
 
@@ -521,12 +670,20 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         {
             IconText = GetIconText(runtimeItem.Snapshot)
         }).ToList();
-        if (wallpaperMenuOpen)
-        {
-            items.Insert(0, new SystemTrayItem("wallpaper-back", "← Fondos", "Volver al menú principal"));
-        }
         state = new SystemTrayState(items);
     }
+
+    /// <summary>Reconstruye el submenú si el workspace cambió mientras estaba abierto.</summary>
+    public void RefreshMinimizedWindows()
+    {
+        if (isDisposed || !minimizedWindowsMenuOpen || minimizedWindowService is null) return;
+
+        RebuildState();
+        Invalidate();
+    }
+
+    private static string GetMinimizedWindowItemId(IntPtr windowHandle) =>
+        $"minimized-window:{windowHandle.ToInt64():X}";
 
     private void RefreshInputLanguages()
     {
@@ -805,6 +962,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         if (selected.Id.Equals("wallpaper", StringComparison.OrdinalIgnoreCase))
         {
             wallpaperMenuOpen = true;
+            minimizedWindowsMenuOpen = false;
             RebuildState();
             Invalidate();
             return;
@@ -822,6 +980,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
         {
             inputLanguageMenuOpen = true;
             wallpaperMenuOpen = false;
+            minimizedWindowsMenuOpen = false;
             RefreshInputLanguages();
             RebuildState();
             Invalidate();
@@ -841,6 +1000,7 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
             notificationMenuOpen = true;
             inputLanguageMenuOpen = false;
             wallpaperMenuOpen = false;
+            minimizedWindowsMenuOpen = false;
             RebuildState();
             Invalidate();
             return;
@@ -851,6 +1011,71 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
             notificationMenuOpen = false;
             RebuildState();
             Invalidate();
+            return;
+        }
+
+        if (selected.Id.Equals("minimized-windows", StringComparison.OrdinalIgnoreCase) && minimizedWindowService is not null)
+        {
+            minimizedWindowsMenuOpen = true;
+            notificationMenuOpen = false;
+            inputLanguageMenuOpen = false;
+            wallpaperMenuOpen = false;
+            RebuildState();
+            Invalidate();
+            return;
+        }
+
+        if (selected.Id.Equals("minimized-windows-back", StringComparison.OrdinalIgnoreCase))
+        {
+            minimizedWindowsMenuOpen = false;
+            RebuildState();
+            Invalidate();
+            return;
+        }
+
+        if (selected.Id.Equals("minimized-windows-empty", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (selected.Id.StartsWith("minimized-window:", StringComparison.OrdinalIgnoreCase) && minimizedWindowService is not null)
+        {
+            var value = selected.Id["minimized-window:".Length..];
+            if (!long.TryParse(value, System.Globalization.NumberStyles.HexNumber, null, out var handleValue))
+            {
+                logger.Error("El identificador de la ventana minimizada no es válido.");
+                return;
+            }
+
+            var handle = (IntPtr)handleValue;
+            var entry = minimizedWindowState.Items.FirstOrDefault(item => item.Handle == handle);
+            if (entry is null)
+            {
+                RebuildState();
+                Invalidate();
+                return;
+            }
+
+            var result = minimizedWindowService.RestoreAndFocus(entry);
+            if (result.Succeeded)
+            {
+                logger.Info("Se restauró y enfocó una ventana minimizada desde la bandeja.");
+                Hide();
+            }
+            else if (result.Failure == WorkspaceFocusFailure.InvalidWindow)
+            {
+                minimizedWindowState.Remove(handle);
+                RebuildState();
+                Invalidate();
+            }
+            else
+            {
+                logger.Error(result.Failure == WorkspaceFocusFailure.AccessDenied
+                    ? "Windows rechazó el foco de la ventana minimizada por restricciones de permisos."
+                    : "Windows rechazó el foco de la ventana minimizada.");
+                RebuildState();
+                Invalidate();
+            }
             return;
         }
 
@@ -881,8 +1106,9 @@ public sealed class SystemTrayService : ISystemTrayService, IDisposable
             default:
                 if (selected.Id.StartsWith("wallpaper:", StringComparison.OrdinalIgnoreCase))
                 {
-                    var path = selected.Id["wallpaper:".Length..];
-                    var wallpaperResult = wallpaperService.Apply(path);
+                    var wallpaperResult = selected.Id.Equals("wallpaper:none", StringComparison.OrdinalIgnoreCase)
+                        ? wallpaperService.ApplyNoBackground()
+                        : wallpaperService.Apply(selected.Id["wallpaper:".Length..]);
                     if (!wallpaperResult.Succeeded) logger.Error(wallpaperResult.Error ?? "No se pudo aplicar el fondo.");
                     break;
                 }

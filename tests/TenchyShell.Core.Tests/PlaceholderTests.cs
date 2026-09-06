@@ -173,6 +173,39 @@ public sealed class PlaceholderTests
         }
     }
 
+    [Theory]
+    [InlineData(1920, 1080, 3840, 2160, 0, 0, 3840, 2160)]
+    [InlineData(7680, 4320, 1920, 1080, 0, 0, 1920, 1080)]
+    [InlineData(1000, 1000, 5760, 2160, 0, -1800, 5760, 5760)]
+    public void WallpaperImageLayoutCoversDesktopWithoutDistorting(int sourceWidth, int sourceHeight, int targetWidth, int targetHeight, int x, int y, int width, int height)
+    {
+        var result = WallpaperImageLayout.CalculateCover(sourceWidth, sourceHeight, targetWidth, targetHeight);
+
+        Assert.Equal(new WallpaperPixelRect(x, y, width, height), result);
+    }
+
+    [Fact]
+    public void WallpaperStateStorePersistsNoBackgroundExplicitly()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var statePath = Path.Combine(directory, "state", "wallpaper.json");
+            var store = new WallpaperStateStore(statePath);
+
+            Assert.True(store.SaveNoBackground().Succeeded);
+            var result = store.Load();
+
+            Assert.True(result.IsNoBackground);
+            Assert.False(result.HasSavedWallpaper);
+            Assert.Null(result.Error);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public void NetworkSnapshotCarriesEthernetDetailsAndWifiNetworks()
     {
@@ -535,6 +568,36 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
+    public void LiveBenchmarkRecorderLimitsAggregatedEventsToTheSampleInterval()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var configuration = new BenchmarkConfiguration
+            {
+                Enabled = true,
+                SampleIntervalSeconds = 3600,
+                RetentionDays = 14,
+                MaxStorageMb = 16
+            };
+            using var recorder = new LiveBenchmarkRecorder(configuration, new FileLogger(directory), Path.Combine(directory, "live"));
+
+            recorder.Start();
+
+            Assert.True(recorder.RecordAtMostEverySampleInterval("workspace_window_enumeration", new { durationMs = 2.0 }));
+            Assert.False(recorder.RecordAtMostEverySampleInterval("workspace_window_enumeration", new { durationMs = 3.0 }));
+
+            var file = Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl"));
+            var lines = File.ReadLines(file).Where(line => line.Contains("\"name\":\"workspace_window_enumeration\"", StringComparison.Ordinal));
+            Assert.Single(lines);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void LiveBenchmarkRecorderDoesNotCreateTelemetryWhenDisabled()
     {
         var directory = CreateTemporaryDirectory();
@@ -551,6 +614,46 @@ public sealed class PlaceholderTests
 
             Assert.False(recorder.IsEnabled);
             Assert.False(Directory.Exists(liveDirectory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LiveBenchmarkRecorderDoesNotCreateOrAppendTelemetryWhenSuppressed()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var liveDirectory = Path.Combine(directory, "live");
+            Directory.CreateDirectory(liveDirectory);
+            var existingPath = Path.Combine(liveDirectory, $"live-{DateTime.UtcNow:yyyyMMdd}.jsonl");
+            File.WriteAllText(existingPath, "existing" + Environment.NewLine);
+            var initialLength = new FileInfo(existingPath).Length;
+            var configuration = new BenchmarkConfiguration
+            {
+                Enabled = true,
+                SampleIntervalSeconds = 1,
+                RetentionDays = 14,
+                MaxStorageMb = 16
+            };
+
+            using (var recorder = new LiveBenchmarkRecorder(
+                       configuration,
+                       new FileLogger(directory),
+                       liveDirectory,
+                       suppressed: true))
+            {
+                recorder.Start();
+                recorder.Record("must_not_be_written");
+                Assert.False(recorder.RecordAtMostEverySampleInterval("must_not_be_written_either"));
+                Assert.False(recorder.IsEnabled);
+            }
+
+            Assert.Equal(initialLength, new FileInfo(existingPath).Length);
+            Assert.Single(Directory.GetFiles(liveDirectory, "live-*.jsonl"));
         }
         finally
         {
@@ -745,6 +848,17 @@ public sealed class PlaceholderTests
         state.SetWorkspace(4);
 
         Assert.Equal("Workspace 4", state.WorkspaceLabel);
+    }
+
+    [Fact]
+    public void StatusPanelClockInvalidatesOnlyWhenTheVisibleSecondChanges()
+    {
+        var clock = new StatusPanelClockState();
+        var firstTick = new DateTime(2026, 9, 2, 14, 32, 8, 100);
+
+        Assert.True(clock.ShouldInvalidate(firstTick));
+        Assert.False(clock.ShouldInvalidate(firstTick.AddMilliseconds(800)));
+        Assert.True(clock.ShouldInvalidate(firstTick.AddSeconds(1)));
     }
 
     [Fact]
@@ -971,6 +1085,78 @@ public sealed class PlaceholderTests
         {
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    [Fact]
+    public void FileLoggerArchivesAnActiveLogFromAnEarlierDay()
+    {
+        var directory = CreateTemporaryDirectory();
+
+        try
+        {
+            var activePath = Path.Combine(directory, "tenchyshell.log");
+            File.WriteAllText(activePath, "mensaje anterior\n");
+            File.SetLastWriteTime(activePath, DateTime.Now.AddDays(-1));
+
+            var logger = new FileLogger(directory);
+            logger.Info("mensaje actual");
+
+            Assert.NotEmpty(Directory.EnumerateFiles(directory, "tenchyshell-*.log"));
+            Assert.Contains("mensaje actual", File.ReadAllText(logger.LogFilePath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FileLoggerPrunesExpiredArchivesButKeepsOtherFiles()
+    {
+        var directory = CreateTemporaryDirectory();
+
+        try
+        {
+            var expired = Path.Combine(directory, "tenchyshell-20200101-000000.log");
+            var unrelated = Path.Combine(directory, "other.log");
+            File.WriteAllText(expired, "expired");
+            File.SetLastWriteTime(expired, DateTime.Now.AddDays(-30));
+            File.WriteAllText(unrelated, "keep");
+
+            _ = new FileLogger(directory);
+
+            Assert.False(File.Exists(expired));
+            Assert.True(File.Exists(unrelated));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SessionStabilityMetricsAggregatesOnlyOutcomeCounts()
+    {
+        var metrics = new SessionStabilityMetrics();
+
+        metrics.RecordFocus(WorkspaceFocusResult.Success());
+        metrics.RecordFocus(WorkspaceFocusResult.Failed(WorkspaceFocusFailure.AccessDenied));
+        metrics.RecordFocus(WorkspaceFocusResult.Failed(WorkspaceFocusFailure.InvalidWindow));
+        metrics.RecordFocus(WorkspaceFocusResult.Failed(WorkspaceFocusFailure.WindowsRejected));
+        metrics.RecordPackagedActivation(ProcessLaunchResult.Success(42));
+        metrics.RecordPackagedActivation(ProcessLaunchResult.Failure("fallo"));
+        metrics.RecordExplorerTransition();
+
+        var snapshot = metrics.Snapshot();
+
+        Assert.Equal(1, snapshot.FocusSucceeded);
+        Assert.Equal(1, snapshot.FocusAccessDenied);
+        Assert.Equal(1, snapshot.FocusInvalid);
+        Assert.Equal(1, snapshot.FocusRejected);
+        Assert.Equal(1, snapshot.PackagedSucceeded);
+        Assert.Equal(1, snapshot.PackagedFailed);
+        Assert.Equal(1, snapshot.ExplorerTransitions);
+        Assert.DoesNotContain("HWND", snapshot.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

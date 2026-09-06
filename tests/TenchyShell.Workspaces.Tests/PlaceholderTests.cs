@@ -96,11 +96,13 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
-    public void WindowSwitcherStateRemovesZeroHandlesAndDuplicates()
+    public void WindowSwitcherStateRemovesInvalidUntitledAndDuplicateItems()
     {
         var state = new WindowSwitcherState(new[]
         {
             new WindowSwitcherItem(IntPtr.Zero, "Invalid"),
+            new WindowSwitcherItem((IntPtr)100, string.Empty),
+            new WindowSwitcherItem((IntPtr)200, "   "),
             new WindowSwitcherItem((IntPtr)101, "First"),
             new WindowSwitcherItem((IntPtr)101, "Duplicate")
         });

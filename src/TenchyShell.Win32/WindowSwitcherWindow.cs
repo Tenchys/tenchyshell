@@ -23,6 +23,7 @@ public sealed class WindowSwitcherWindow : IDisposable
     private readonly WindowSwitcherConfiguration configuration;
     private readonly ILogger? logger;
     private readonly LiveBenchmarkRecorder? benchmarkRecorder;
+    private readonly SessionStabilityMetrics? stabilityMetrics;
     private readonly WindowFocusRestrictionCache focusRestrictionCache = new();
     private IntPtr windowHandle;
     private IntPtr previousForegroundWindow;
@@ -36,13 +37,15 @@ public sealed class WindowSwitcherWindow : IDisposable
         IWorkspaceWindowService windowService,
         WindowSwitcherConfiguration configuration,
         ILogger? logger = null,
-        LiveBenchmarkRecorder? benchmarkRecorder = null)
+        LiveBenchmarkRecorder? benchmarkRecorder = null,
+        SessionStabilityMetrics? stabilityMetrics = null)
     {
         this.workspaceSource = workspaceSource;
         this.windowService = windowService;
         this.configuration = configuration;
         this.logger = logger;
         this.benchmarkRecorder = benchmarkRecorder?.IsEnabled == true ? benchmarkRecorder : null;
+        this.stabilityMetrics = stabilityMetrics;
         windowProcedure = WindowProcedure;
         moduleHandle = NativeMethods.GetModuleHandle(null);
     }
@@ -267,12 +270,14 @@ public sealed class WindowSwitcherWindow : IDisposable
         if (selected is null)
         {
             Hide(restorePreviousFocus: false);
+            stabilityMetrics?.RecordFocus(WorkspaceFocusResult.Failed(WorkspaceFocusFailure.InvalidWindow));
             logger?.Error("El selector no tenía una ventana válida para enfocar.");
             return;
         }
 
         if (selected.FocusRestricted)
         {
+            stabilityMetrics?.RecordFocus(WorkspaceFocusResult.Failed(WorkspaceFocusFailure.AccessDenied));
             benchmarkRecorder?.Record("window_switcher_confirmation", new
             {
                 selectedHandle = selected.Handle.ToInt64(),
@@ -293,6 +298,7 @@ public sealed class WindowSwitcherWindow : IDisposable
         // llamada permite a Windows devolver el foco a la ventana anterior y
         // rechazar el cambio solicitado por TenchyShell.
         var focusResult = windowService.Focus(selected.Handle);
+        stabilityMetrics?.RecordFocus(focusResult);
         stopwatch.Stop();
         var foregroundAfter = windowService.GetForegroundWindow();
         benchmarkRecorder?.Record("window_switcher_confirmation", new

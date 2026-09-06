@@ -4,6 +4,11 @@ Shell minimalista para Windows 11 Pro, orientado al teclado y diseñado para red
 
 TenchyShell fue desarrollado con asistencia de OpenAI Codex, manteniendo una arquitectura pequeña, nativa y enfocada en la recuperación segura de la sesión.
 
+## Licencia
+
+TenchyShell se distribuye bajo la licencia [MIT](LICENSE). Las dependencias de
+terceros conservan sus propias licencias.
+
 ## Estado actual
 
 El MVP 0.7 consolida el producto bajo el nombre TenchyShell. Incluye el
@@ -11,6 +16,10 @@ message loop Win32, recuperación de Explorer, launcher, workspaces, gestión y
 layout de ventanas, panel, bandeja propia, red, fondos e idioma de teclado. La
 aplicación mantiene una única instancia compatible con el mutex heredado y las
 consultas de red del dock se ejecutan fuera del message loop.
+
+El hito 0.8.1 permite desactivar de forma independiente el dock y el buscador
+de aplicaciones desde `[OPTIONALS]`, sin afectar la bandeja propia ni la ruta
+de recuperación.
 
 ## Documentación
 
@@ -132,6 +141,10 @@ La compilación debe finalizar sin advertencias ni errores. Las pruebas no deben
 
 ## Configuración TOML y ubicación predeterminada
 
+Al iniciar TenchyShell se abre la TUI integrada dentro del terminal configurado.
+También puede ejecutarse directamente con `TenchyShell.exe --tui <ruta.toml>`;
+`--without-tui` permite iniciar sólo el shell durante diagnóstico o recuperación.
+
 Tras la instalación, la aplicación carga automáticamente la configuración del usuario si se inicia sin argumentos:
 
 ```text
@@ -153,6 +166,22 @@ El archivo `TenchyShell.without-explorer.example.toml` es el perfil de prueba si
 ```
 
 Si no se proporciona una ruta, la aplicación usa los valores incorporados en el código; no modifica ni crea archivos TOML automáticamente. Los comentarios de los archivos de ejemplo describen cada opción, incluidas hotkeys, terminal, panel, zonas y tamaño proporcional de los números del overlay.
+
+La sección `[OPTIONALS]` controla las superficies adicionales sin cambiar las
+funciones esenciales:
+
+```toml
+[OPTIONALS]
+dock = true
+application_search = true
+```
+
+Ambas opciones están activas por defecto. `dock = false` o
+`[status_panel].enabled = false` evita crear el panel y registrar su hotkey;
+`application_search = false` o `[launcher].enabled = false` evita crear el
+catálogo, la ventana y el hotkey del launcher. Los cambios se aplican al
+siguiente inicio y los valores no booleanos se rechazan antes de iniciar la
+sesión.
 
 ## Estructura
 
@@ -189,18 +218,39 @@ Los perfiles antiguos también pueden seguir pasándose explícitamente por ruta
 
 El protocolo, las métricas y los criterios para aceptar optimizaciones están en
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Los datos crudos se guardan en
-`%LOCALAPPDATA%\TenchyShell\benchmarks\v2\<batch-id>\` y no se versionan porque
+`%LOCALAPPDATA%\TenchyShell\benchmarks\v3\<batch-id>\` y no se versionan porque
 contienen metadatos de la máquina y de sus procesos. Antes de una captura
 oficial puede verificarse el instrumental con
 `scripts\test-performance.ps1`; los smoke tests quedan marcados como no
 oficiales y no pueden mezclarse con la comparativa final.
 
+El esquema v3 identifica el núcleo por PID, muestra por separado `Core` y
+`ShellSession`, excluye y cuantifica al observador PowerShell/CIM y suprime la
+telemetría live durante `--automated-benchmark`. Las capturas v2 permanecen
+solo como evidencia histórica y no son línea base válida para el hito 0.8.7.
+
 Para observar un flujo de trabajo real instalado, habilita `[benchmark]` en el
 TOML. Este modo no cierra Explorer ni altera la sesión: crea registros JSONL
 diarios en `%LOCALAPPDATA%\TenchyShell\benchmarks\live\`, conserva 14 días y
 un máximo de 256 MB por defecto. El perfil `detailed` puede guardar títulos de
-ventana y comandos solicitados desde TenchyShell; revisa esos archivos antes de
-compartirlos.
+ventana y comandos solicitados desde TenchyShell; no guarda decisiones por cada
+ventana enumerada y limita sus agregados al intervalo de muestra. Revisa esos
+archivos antes de compartirlos.
+
+Para obtener un resumen pequeño de la última sesión —sin abrir ni compartir los
+JSONL completos— ejecuta:
+
+```powershell
+.\scripts\summarize-live-telemetry.ps1
+```
+
+El informe muestra deltas de recursos, CPU promedio, cadencia de muestreo,
+agregados de actividad y anomalías de telemetría o logs. Usa
+`-IncludeErrorMessages` sólo si necesitas el texto de los errores locales.
+
+La TUI incluye también **Telemetría** en su menú principal. La vista ejecuta el
+resumen al abrirse y al pulsar `R`; sus resultados se desplazan con las flechas,
+PageUp/PageDown, Home y End.
 
 ## Hotkeys
 
@@ -251,6 +301,11 @@ El layout inicial se define en `[layout]` y usa dos columnas con una fila (`1x2`
 - Acciones de sesión para cerrar sesión, apagar o reiniciar, siempre con `--confirm`.
 - Diagnóstico de dependencias y logs en `%LOCALAPPDATA%\TenchyShell\logs\`.
 
+El dock propio se organiza en `equipo`, `aplicaciones` y `sesion`; sus acciones
+de sesión requieren confirmación doble. La guía de Yazi es de sólo lectura y
+usa `YAZI_CONFIG_HOME` o `%APPDATA%\yazi\config`, sin ejecutar contenido de
+`keymap.toml`.
+
 La aplicación no reemplaza permanentemente Winlogon, no implementa una taskbar
 completa y no incluye búsqueda web, plugins ni un administrador de archivos
 interno. Su bandeja es propia y solo expone integraciones declaradas.
@@ -295,7 +350,8 @@ dotnet test TenchyShell.slnx
 
 ## Panel informativo
 
-El panel opcional se configura en `[status_panel]` y está habilitado por defecto:
+El panel opcional se controla con `[OPTIONALS].dock` y está habilitado por
+defecto. También debe estar habilitado en `[status_panel]`:
 
 ```toml
 [status_panel]
@@ -311,7 +367,7 @@ Permanece oculto al iniciar. `Ctrl+Alt+S` lo muestra u oculta de forma persisten
 
 ## Launcher mínimo
 
-El launcher propio se abre con `Ctrl+Alt+Space` por defecto y busca aplicaciones del Menú Inicio y de `shell:AppsFolder`. La búsqueda funciona con el teclado: escribe texto, usa las flechas y presiona `Enter` para lanzar; `Escape` cancela. El hotkey se puede cambiar en `[hotkeys].launcher`; `Win+Space` y `Win+Alt+Space` pueden estar reservados por Windows o PowerToys.
+El launcher propio se abre con `Ctrl+Alt+Space` por defecto y busca aplicaciones del Menú Inicio y de `shell:AppsFolder`. La búsqueda funciona con el teclado: escribe texto, usa las flechas y presiona `Enter` para lanzar; `Escape` cancela. El hotkey se puede cambiar en `[hotkeys].launcher`; `Win+Space` y `Win+Alt+Space` pueden estar reservados por Windows o PowerToys. Si `[OPTIONALS].application_search = false` o `[launcher].enabled = false`, no se crea.
 
 Para ejecutar un comando en la terminal configurada, escribe `!` seguido del comando y presiona `Enter`:
 

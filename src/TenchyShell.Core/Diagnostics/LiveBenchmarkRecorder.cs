@@ -14,15 +14,22 @@ public sealed class LiveBenchmarkRecorder : IDisposable
     private readonly BenchmarkConfiguration configuration;
     private readonly ILogger logger;
     private readonly string directory;
+    private readonly bool suppressed;
     private readonly object syncRoot = new();
     private readonly string sessionId = Guid.NewGuid().ToString("N");
+    private readonly Dictionary<string, DateTimeOffset> lastSampledEventAt = new(StringComparer.Ordinal);
     private Timer? timer;
     private bool disposed;
 
-    public LiveBenchmarkRecorder(BenchmarkConfiguration configuration, ILogger logger, string? rootDirectory = null)
+    public LiveBenchmarkRecorder(
+        BenchmarkConfiguration configuration,
+        ILogger logger,
+        string? rootDirectory = null,
+        bool suppressed = false)
     {
         this.configuration = configuration;
         this.logger = logger;
+        this.suppressed = suppressed;
         directory = rootDirectory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TenchyShell", "benchmarks", "live");
@@ -30,11 +37,11 @@ public sealed class LiveBenchmarkRecorder : IDisposable
 
     public string DirectoryPath => directory;
 
-    public bool IsEnabled => configuration.Enabled && !disposed;
+    public bool IsEnabled => configuration.Enabled && !suppressed && !disposed;
 
     public void Start()
     {
-        if (!configuration.Enabled || disposed) return;
+        if (!IsEnabled) return;
         try
         {
             Directory.CreateDirectory(directory);
@@ -50,7 +57,7 @@ public sealed class LiveBenchmarkRecorder : IDisposable
 
     public void Record(string eventName, object? details = null)
     {
-        if (!configuration.Enabled || disposed) return;
+        if (!IsEnabled) return;
         try
         {
             Write(new { timestamp = DateTimeOffset.UtcNow, sessionId, type = "event", name = eventName, details });
@@ -61,6 +68,38 @@ public sealed class LiveBenchmarkRecorder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Registra un evento agregado como máximo una vez por intervalo de muestra.
+    /// Evita que una ruta de refresco frecuente altere el benchmark que observa.
+    /// </summary>
+    public bool RecordAtMostEverySampleInterval(string eventName, object? details = null)
+    {
+        if (!IsEnabled) return false;
+        try
+        {
+            lock (syncRoot)
+            {
+                if (disposed) return false;
+
+                var now = DateTimeOffset.UtcNow;
+                var interval = TimeSpan.FromSeconds(configuration.SampleIntervalSeconds);
+                if (lastSampledEventAt.TryGetValue(eventName, out var lastRecordedAt) && now - lastRecordedAt < interval)
+                {
+                    return false;
+                }
+
+                WriteUnsafe(new { timestamp = now, sessionId, type = "event", name = eventName, details });
+                lastSampledEventAt[eventName] = now;
+                return true;
+            }
+        }
+        catch (Exception exception)
+        {
+            SafeLogError($"No se pudo registrar el evento de benchmark limitado '{eventName}'.", exception);
+            return false;
+        }
+    }
+
     public void Dispose()
     {
         lock (syncRoot)
@@ -68,7 +107,10 @@ public sealed class LiveBenchmarkRecorder : IDisposable
             if (disposed) return;
             timer?.Dispose();
             timer = null;
-            WriteUnsafe(new { timestamp = DateTimeOffset.UtcNow, sessionId, type = "event", name = "session_stopped", details = (object?)null });
+            if (configuration.Enabled && !suppressed)
+            {
+                WriteUnsafe(new { timestamp = DateTimeOffset.UtcNow, sessionId, type = "event", name = "session_stopped", details = (object?)null });
+            }
             disposed = true;
         }
     }

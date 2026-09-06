@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO.Pipes;
 using System.Text.Json;
+using TenchyShell.Core.Logging;
 using TenchyShell.Core.Notifications;
 using Windows.Foundation;
 using Windows.Storage.Streams;
@@ -182,25 +183,37 @@ internal static class Program
 
 internal static class BridgeLog
 {
-    private static readonly object Gate = new();
-    private static readonly string Path = System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "TenchyShell", "logs", "notification-bridge.log");
+    private static readonly Lazy<FileLogger?> Logger = new(CreateLogger);
 
-    public static void Info(string message) => Write("INFO", message);
+    public static void Info(string message) => TryWrite(logger => logger.Info(message));
 
-    public static void Error(string message, Exception? exception = null) =>
-        Write("ERROR", exception is null ? message : $"{message} {exception}");
+    public static void Error(string message, Exception? exception = null)
+    {
+        TryWrite(logger =>
+        {
+            if (exception is null) logger.Error(message);
+            else logger.Error(message, exception);
+        });
+    }
 
-    private static void Write(string level, string message)
+    private static FileLogger? CreateLogger()
     {
         try
         {
-            lock (Gate)
-            {
-                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
-                File.AppendAllText(Path, $"{DateTimeOffset.Now:O} [{level}] {message}{Environment.NewLine}");
-            }
+            return new FileLogger(logFileName: "notification-bridge.log");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void TryWrite(Action<FileLogger> write)
+    {
+        try
+        {
+            var logger = Logger.Value;
+            if (logger is not null) write(logger);
         }
         catch
         {

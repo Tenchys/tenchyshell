@@ -12,6 +12,20 @@ max_storage_mb = 256
 [notifications]
 enabled = true
 
+# API local opcional para YASB. Usa un Named Pipe sólo del usuario actual.
+[api]
+enabled = true
+
+[tui]
+enabled = true
+title = "TenchyShell sin Explorer"
+
+[[tui.widgets]]
+id = "recovery"
+title = "Atajo de recuperación"
+type = "configuration"
+source = "hotkeys.recovery"
+
 [terminal]
 command = "wezterm-gui.exe"
 file_manager_arguments = "start --always-new-process --"
@@ -27,6 +41,11 @@ command = ""
 
 [applications]
 browser = "msedge.exe"
+
+[OPTIONALS]
+# Superficies opcionales de TenchyShell. Reinicia el shell tras modificar estos valores.
+dock = true
+application_search = true
 
 [status_panel]
 enabled = true

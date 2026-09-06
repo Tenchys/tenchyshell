@@ -11,6 +11,8 @@ public sealed class ShellConfiguration
 
     public LauncherConfiguration Launcher { get; init; } = new();
 
+    public OptionalComponentsConfiguration Optionals { get; init; } = new();
+
     public ApplicationConfiguration Applications { get; init; } = new();
 
     public HotkeyConfiguration Hotkeys { get; init; } = new();
@@ -29,6 +31,8 @@ public sealed class ShellConfiguration
 
     public string ConfigurationDirectory { get; init; } = Environment.CurrentDirectory;
 
+    public string ConfigurationPath { get; init; } = string.Empty;
+
     public SystemTrayConfiguration SystemTray { get; init; } = new();
 
     public InputLanguageConfiguration InputLanguage { get; init; } = new();
@@ -39,7 +43,58 @@ public sealed class ShellConfiguration
 
     public NotificationConfiguration Notifications { get; init; } = new();
 
+    public DockConfiguration Dock { get; init; } = DockConfiguration.CreateDefault();
+
+    public TuiConfiguration Tui { get; init; } = new();
+
+    public LocalApiConfiguration Api { get; init; } = new();
+
     public static ShellConfiguration CreateDefault() => new();
+}
+
+public sealed class DockConfiguration
+{
+    public bool Enabled { get; init; } = true;
+    public IReadOnlyList<DockCategoryConfiguration> Categories { get; init; } = Array.Empty<DockCategoryConfiguration>();
+
+    public static DockConfiguration CreateDefault() => new()
+    {
+        Categories = new[]
+        {
+            new DockCategoryConfiguration { Id = "equipo", Title = "Equipo", Order = 10, Items = new[] {
+                new DockItemConfiguration { Id = "network", Title = "Red", Action = "network" },
+                new DockItemConfiguration { Id = "wallpaper", Title = "Fondos", Action = "wallpaper" },
+                new DockItemConfiguration { Id = "input-language", Title = "Idioma", Action = "input-language" },
+                new DockItemConfiguration { Id = "windows", Title = "Minimizadas", Action = "windows" }}},
+            new DockCategoryConfiguration { Id = "aplicaciones", Title = "Aplicaciones", Order = 20, Items = new[] {
+                new DockItemConfiguration { Id = "terminal", Title = "Terminal", Action = "terminal" },
+                new DockItemConfiguration { Id = "files", Title = "Yazi", Action = "files" },
+                new DockItemConfiguration { Id = "browser", Title = "Navegador", Action = "browser" },
+                new DockItemConfiguration { Id = "launcher", Title = "Launcher", Action = "launcher" }}},
+            new DockCategoryConfiguration { Id = "sesion", Title = "Sesión", Order = 30, Items = new[] {
+                new DockItemConfiguration { Id = "logout", Title = "Cerrar sesión", Action = "logout" },
+                new DockItemConfiguration { Id = "shutdown", Title = "Apagar", Action = "shutdown" },
+                new DockItemConfiguration { Id = "restart", Title = "Reiniciar", Action = "restart" },
+                new DockItemConfiguration { Id = "recovery", Title = "Recuperación", Action = "recovery" }}}
+        }
+    };
+}
+
+public sealed class DockCategoryConfiguration
+{
+    public string Id { get; init; } = string.Empty;
+    public string Title { get; init; } = string.Empty;
+    public int Order { get; init; }
+    public bool Visible { get; init; } = true;
+    public IReadOnlyList<DockItemConfiguration> Items { get; init; } = Array.Empty<DockItemConfiguration>();
+}
+
+public sealed class DockItemConfiguration
+{
+    public string Id { get; init; } = string.Empty;
+    public string Title { get; init; } = string.Empty;
+    public string Action { get; init; } = string.Empty;
+    public bool Visible { get; init; } = true;
 }
 
 public sealed class BenchmarkConfiguration
@@ -60,6 +115,45 @@ public sealed class NotificationConfiguration
 {
     /// <summary>Requiere el bridge MSIX opcional y autorización del usuario.</summary>
     public bool Enabled { get; init; }
+}
+
+public enum TuiWidgetType
+{
+    Unknown,
+    Static,
+    Configuration,
+    Command
+}
+
+public sealed class TuiConfiguration
+{
+    public bool Enabled { get; init; } = true;
+
+    public string Title { get; init; } = "TenchyShell";
+
+    public IReadOnlyList<TuiWidgetConfiguration> Widgets { get; init; } = Array.Empty<TuiWidgetConfiguration>();
+}
+
+public sealed class TuiWidgetConfiguration
+{
+    public string Id { get; init; } = string.Empty;
+
+    public string Title { get; init; } = string.Empty;
+
+    public TuiWidgetType Type { get; init; } = TuiWidgetType.Unknown;
+
+    public string Source { get; init; } = string.Empty;
+
+    public string Command { get; init; } = string.Empty;
+
+    public IReadOnlyList<string> Arguments { get; init; } = Array.Empty<string>();
+
+    public int TimeoutMilliseconds { get; init; } = 1500;
+
+    public int MaxOutputBytes { get; init; } = 4096;
+
+    /// <summary>0 significa actualización manual desde la TUI.</summary>
+    public int UpdateMilliseconds { get; init; }
 }
 
 public sealed class TerminalConfiguration
@@ -83,6 +177,13 @@ public sealed class LauncherConfiguration
     public bool Enabled { get; init; } = true;
 
     public string Command { get; init; } = string.Empty;
+}
+
+public sealed class OptionalComponentsConfiguration
+{
+    public bool Dock { get; init; } = true;
+
+    public bool ApplicationSearch { get; init; } = true;
 }
 
 public sealed class ApplicationConfiguration
