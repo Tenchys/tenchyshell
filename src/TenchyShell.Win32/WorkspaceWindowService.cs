@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using TenchyShell.Core.Diagnostics;
+using TenchyShell.Core.Logging;
 using TenchyShell.Core.Windows;
 
 namespace TenchyShell.Win32;
@@ -9,41 +10,88 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
 {
     private readonly uint currentProcessId = (uint)Environment.ProcessId;
     private readonly LiveBenchmarkRecorder? benchmarkRecorder;
+    private readonly ILogger? logger;
 
-    public WorkspaceWindowService(LiveBenchmarkRecorder? benchmarkRecorder = null)
+    public WorkspaceWindowService(LiveBenchmarkRecorder? benchmarkRecorder = null, ILogger? logger = null)
     {
         this.benchmarkRecorder = benchmarkRecorder?.IsEnabled == true ? benchmarkRecorder : null;
+        this.logger = logger;
+    }
+
+    public WorkspaceWindowCapture CaptureSnapshot(string operation = "workspace")
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        var windows = new List<TenchyShell.Core.Windows.WorkspaceWindowSnapshot>();
+        var discarded = 0;
+        var metadataQueries = 0;
+        var enumWindowsCalls = 0;
+        enumWindowsCalls++;
+
+        NativeMethods.EnumWindows((windowHandle, _) =>
+        {
+            metadataQueries++;
+            try
+            {
+                var snapshot = CreateSnapshot(windowHandle);
+                var decision = DecideWindowTracking(snapshot, currentProcessId);
+                if (decision.Include)
+                {
+                    windows.Add(new TenchyShell.Core.Windows.WorkspaceWindowSnapshot(
+                        windowHandle,
+                        new WorkspaceWindowMetadata(
+                            Exists: true,
+                            IsVisible: snapshot.IsVisible,
+                            IsMinimized: NativeMethods.IsIconic(windowHandle),
+                            Title: snapshot.Title,
+                            IsOperable: true),
+                        snapshot.ProcessId));
+                }
+                else
+                {
+                    discarded++;
+                }
+            }
+            catch
+            {
+                // Una ventana puede desaparecer o denegar metadata durante EnumWindows.
+                discarded++;
+            }
+
+            return true;
+        }, IntPtr.Zero);
+
+        var capture = new WorkspaceWindowCapture(
+            operation,
+            windows,
+            enumWindowsCalls,
+            metadataQueries,
+            discarded,
+            Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
+        RecordCaptureTelemetry(capture);
+        return capture;
+    }
+
+    public bool RevalidateWindow(TenchyShell.Core.Windows.WorkspaceWindowSnapshot snapshot)
+    {
+        if (snapshot.Handle == IntPtr.Zero || !NativeMethods.IsWindow(snapshot.Handle)) return false;
+        var processId = 0u;
+        if (snapshot.ProcessId != 0 && NativeMethods.GetWindowThreadProcessId(snapshot.Handle, out processId) == 0) return false;
+        if (snapshot.ProcessId != 0 && processId != snapshot.ProcessId) return false;
+        if (!string.IsNullOrWhiteSpace(snapshot.Title) && NativeMethods.GetWindowTitleOrEmpty(snapshot.Handle) != snapshot.Title) return false;
+        return true;
     }
 
     public IReadOnlyList<IntPtr> GetVisibleTopLevelWindows()
     {
-        var windows = new List<IntPtr>();
-        var stopwatch = benchmarkRecorder is null ? null : Stopwatch.StartNew();
-
-        NativeMethods.EnumWindows((windowHandle, _) =>
-        {
-            var snapshot = CreateSnapshot(windowHandle);
-            var decision = DecideWindowTracking(snapshot, currentProcessId);
-            if (decision.Include) windows.Add(windowHandle);
-            return true;
-        }, IntPtr.Zero);
-
-        if (stopwatch is not null)
-        {
-            stopwatch.Stop();
-            benchmarkRecorder!.RecordAtMostEverySampleInterval("workspace_window_enumeration", new
-            {
-                durationMs = stopwatch.Elapsed.TotalMilliseconds,
-                includedCount = windows.Count
-            });
-        }
-
-        return windows;
+        return CaptureSnapshot("workspace").Windows.Select(window => window.Handle).ToArray();
     }
 
     // El selector necesita el valor Win32 sin sustitutos: WindowSwitcherState
     // descarta los HWND cuyo título desapareció desde el último Refresh.
     public string GetWindowTitle(IntPtr windowHandle) => NativeMethods.GetWindowTitleOrEmpty(windowHandle);
+
+    public bool WindowExists(IntPtr windowHandle) =>
+        windowHandle != IntPtr.Zero && NativeMethods.IsWindow(windowHandle);
 
     public WorkspaceWindowMetadata GetWindowMetadata(IntPtr windowHandle)
     {
@@ -59,7 +107,8 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
             IsVisible: snapshot.IsVisible,
             IsMinimized: NativeMethods.IsIconic(windowHandle),
             Title: snapshot.Title,
-            IsOperable: decision.Include);
+            IsOperable: decision.Include,
+            ProcessId: snapshot.ProcessId);
     }
 
     public IntPtr GetForegroundWindow() => NativeMethods.GetForegroundWindow();
@@ -79,6 +128,13 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
 
         NativeMethods.ShowWindow(windowHandle, NativeMethods.SW_RESTORE);
         return Focus(windowHandle);
+    }
+
+    public WorkspaceFocusResult RestoreAndFocus(TenchyShell.Core.Windows.WorkspaceWindowSnapshot snapshot)
+    {
+        if (!RevalidateWindow(snapshot)) return WorkspaceFocusResult.Failed(WorkspaceFocusFailure.InvalidWindow);
+        NativeMethods.ShowWindow(snapshot.Handle, NativeMethods.SW_RESTORE);
+        return Focus(snapshot.Handle);
     }
 
     public WorkspaceFocusResult Focus(IntPtr windowHandle)
@@ -199,6 +255,22 @@ public sealed class WorkspaceWindowService : IWorkspaceWindowService
             GetAltTabRepresentative(rootOwner),
             extendedStyle,
             NativeMethods.IsWindowCloaked(windowHandle));
+    }
+
+    private void RecordCaptureTelemetry(WorkspaceWindowCapture capture)
+    {
+        var details = new
+        {
+            operation = capture.Operation,
+            enumWindows = capture.EnumWindowsCalls,
+            metadataQueries = capture.MetadataQueries,
+            durationMs = capture.DurationMilliseconds,
+            discardedHandles = capture.DiscardedHandles,
+            revalidationFailures = capture.RevalidationFailures,
+            includedCount = capture.Windows.Count
+        };
+        logger?.Info($"Snapshot de ventanas ({capture.Operation}): EnumWindows={capture.EnumWindowsCalls}, metadata={capture.MetadataQueries}, descartados={capture.DiscardedHandles}, duración={capture.DurationMilliseconds:F2} ms.");
+        benchmarkRecorder?.Record("workspace_window_snapshot", details);
     }
 
     private static IntPtr GetAltTabRepresentative(IntPtr rootOwner)

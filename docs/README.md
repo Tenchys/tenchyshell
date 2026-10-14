@@ -1,6 +1,6 @@
 # Documentación de TenchyShell
 
-Esta carpeta reúne la documentación canónica del MVP 0.7.11. El
+Esta carpeta reúne la documentación canónica de TenchyShell 0.8.9. El
 [`README` principal](../README.md) es el punto de entrada corto; estas guías
 explican cómo instalar, usar, operar y mantener el proyecto.
 

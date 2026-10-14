@@ -12,6 +12,17 @@ internal static class NativeMethods
     internal const uint CLSCTX_INPROC_SERVER = 0x1;
     internal const uint CLSCTX_LOCAL_SERVER = 0x4;
     internal const int RPC_E_CHANGED_MODE = unchecked((int)0x80010106);
+    internal const uint GR_GDIOBJECTS = 0;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetProcessIoCounters(IntPtr processHandle, out IoCounters counters);
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentProcess();
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetGuiResources(IntPtr processHandle, uint flags);
 
     [DllImport("ole32.dll")]
     internal static extern int CoInitializeEx(IntPtr reserved, uint coInit);
@@ -38,8 +49,8 @@ internal static class NativeMethods
     internal const uint WM_ERASEBKGND = 0x0014;
     internal const uint WM_TIMER = 0x0113;
     internal const uint WM_DPICHANGED = 0x02E0;
-    internal const uint WM_NCHITTEST = 0x0084;
     internal const uint WM_MOUSEACTIVATE = 0x0021;
+    internal const uint WM_NCHITTEST = 0x0084;
     internal const uint WM_APP_EXECUTE = 0x8001;
     internal const uint WM_APP_WALLPAPER_FOREGROUND = 0x8002;
     internal const uint WM_INPUTLANGCHANGEREQUEST = 0x0050;
@@ -119,6 +130,8 @@ internal static class NativeMethods
     internal const uint WS_EX_LAYERED = 0x00080000;
     internal const uint WS_EX_TRANSPARENT = 0x00000020;
     internal const uint LWA_ALPHA = 0x00000002;
+    internal const uint WS_EX_NOACTIVATE = 0x08000000;
+    internal const uint WS_POPUP = 0x80000000;
     internal const int WH_KEYBOARD_LL = 13;
     internal const int WH_MOUSE_LL = 14;
     internal const uint MONITORINFOF_PRIMARY = 0x00000001;
@@ -131,11 +144,16 @@ internal static class NativeMethods
     internal const uint CLEARTYPE_QUALITY = 5;
     internal const uint DEFAULT_PITCH = 0;
     internal const uint FF_DONTCARE = 0;
+    internal const int PS_SOLID = 0;
+    internal const int NULL_BRUSH = 5;
+    internal const int NULL_PEN = 8;
     internal const uint DT_CENTER = 0x00000001;
     internal const uint DT_VCENTER = 0x00000004;
     internal const uint DT_WORDBREAK = 0x00000010;
     internal const uint DT_SINGLELINE = 0x00000020;
     internal const uint DT_CALCRECT = 0x00000400;
+    internal const uint DT_NOPREFIX = 0x00000800;
+    internal const uint DT_END_ELLIPSIS = 0x00008000;
     internal const int DEFAULT_GUI_FONT = 17;
     internal const uint IMAGE_ICON = 1;
     internal const uint LR_LOADFROMFILE = 0x00000010;
@@ -430,6 +448,10 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool InvalidateRect(IntPtr hWnd, IntPtr rectangle, bool erase);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool UpdateWindow(IntPtr hWnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern nuint SetTimer(IntPtr hWnd, nuint timerId, uint milliseconds, IntPtr timerCallback);
 
@@ -495,6 +517,39 @@ internal static class NativeMethods
 
     [DllImport("gdi32.dll")]
     internal static extern IntPtr CreateSolidBrush(uint color);
+
+    [DllImport("gdi32.dll")]
+    internal static extern IntPtr CreatePen(int style, int width, uint color);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool RoundRect(
+        IntPtr deviceContext,
+        int left,
+        int top,
+        int right,
+        int bottom,
+        int ellipseWidth,
+        int ellipseHeight);
+
+    [DllImport("gdi32.dll")]
+    internal static extern IntPtr CreateRoundRectRgn(
+        int left,
+        int top,
+        int right,
+        int bottom,
+        int ellipseWidth,
+        int ellipseHeight);
+
+    [DllImport("gdi32.dll")]
+    internal static extern int SelectClipRgn(IntPtr deviceContext, IntPtr region);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool Polygon(
+        IntPtr deviceContext,
+        [In] Point[] points,
+        int pointCount);
 
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "CreateFontW")]
     internal static extern IntPtr CreateFont(

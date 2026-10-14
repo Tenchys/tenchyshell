@@ -41,6 +41,8 @@ public sealed class ShellConfiguration
 
     public BenchmarkConfiguration Benchmark { get; init; } = new();
 
+    public LoggingConfiguration Logging { get; init; } = new();
+
     public NotificationConfiguration Notifications { get; init; } = new();
 
     public DockConfiguration Dock { get; init; } = DockConfiguration.CreateDefault();
@@ -109,6 +111,12 @@ public sealed class BenchmarkConfiguration
     public int RetentionDays { get; init; } = 14;
 
     public int MaxStorageMb { get; init; } = 256;
+}
+
+public sealed class LoggingConfiguration
+{
+    /// <summary>Duplica el log persistente en stdout/stderr para diagnósticos externos.</summary>
+    public bool Console { get; init; }
 }
 
 public sealed class NotificationConfiguration

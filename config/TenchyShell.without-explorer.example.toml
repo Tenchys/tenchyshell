@@ -8,6 +8,10 @@ sample_interval_seconds = 10
 retention_days = 14
 max_storage_mb = 256
 
+[logging]
+# El benchmark externo captura stdout/stderr junto con el log persistente.
+console = true
+
 # Requiere instalar y autorizar el bridge MSIX opcional de notificaciones.
 [notifications]
 enabled = true

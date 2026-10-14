@@ -6,6 +6,7 @@ using TenchyShell.Core.Applications;
 using TenchyShell.Core.Commands;
 using TenchyShell.Core.Session;
 using TenchyShell.Core.Runtime;
+using TenchyShell.Core.Startup;
 using TenchyShell.Win32;
 using TenchyShell.Tui;
 
@@ -21,8 +22,15 @@ internal static class Program
             return 0;
         }
 
+        if (!TryGetOptionalArgumentValue(args, "--session-id", out var requestedSessionId, out var sessionIdError))
+        {
+            Console.Error.WriteLine(sessionIdError);
+            return 1;
+        }
+
         var migration = LegacyDataMigrator.MigrateDefault();
-        var logger = new FileLogger();
+        var runId = requestedSessionId ?? Guid.NewGuid().ToString("N");
+        var logger = new FileLogger(sessionId: runId);
         ReportLegacyMigration(logger, migration);
         if (!PackagedActivationDiagnosticOptions.TryParse(args, out var packagedDiagnostic, out var packagedDiagnosticError))
         {
@@ -52,6 +60,7 @@ internal static class Program
         var testNotification = HasArgument(args, "--test-notification");
         var checkOnly = HasArgument(args, "--check");
         var withoutTui = HasArgument(args, "--without-tui");
+        var keepSplash = HasArgument(args, "--keep-splash");
         if (!TryGetOptionalPositiveInteger(args, "--exit-after-seconds", 3600, out var exitAfterSeconds, out var optionError))
         {
             Console.Error.WriteLine(optionError);
@@ -87,6 +96,9 @@ internal static class Program
 
             return 1;
         }
+
+        logger.ConsoleEnabled = result.Configuration.Logging.Console;
+        logger.MetricsEnabled = result.Configuration.Benchmark.Enabled;
 
         if (testNotification && !result.Configuration.Benchmark.Enabled)
         {
@@ -151,8 +163,34 @@ internal static class Program
         }
 
         if (automatedBenchmark)
+            logger.Info($"Benchmark automatizado solicitado; la telemetría live se conservará y no habrá recuperación automática de Explorer. sessionId={runId}.");
+
+        var showStartupSplash = !automatedBenchmark &&
+                                packagedDiagnostic is null &&
+                                !HasArgument(args, "--tui") &&
+                                launchIndex < 0 &&
+                                sessionIndex < 0;
+        StartupProgressState? startupProgress = null;
+        StartupSplashWindow? startupSplash = null;
+        if (showStartupSplash)
         {
-            logger.Info($"Benchmark automatizado solicitado; la telemetría live queda suprimida y Explorer se restaurará al finalizar en un máximo de {exitAfterSeconds} segundos.");
+            startupProgress = new StartupProgressState();
+            try
+            {
+                startupSplash = new StartupSplashWindow(startupProgress, keepVisibleWhenReady: keepSplash);
+                startupProgress.ReportStarted(
+                    StartupModule.MigrationAndConfiguration,
+                    "Migrando datos y validando la configuración");
+                startupProgress.ReportCompleted(StartupModule.MigrationAndConfiguration);
+            }
+            catch (Exception exception)
+            {
+                startupSplash?.Dispose();
+                startupProgress?.Close();
+                logger.Error("No se pudo crear el splash de inicio; se aborta el arranque.", exception);
+                Console.Error.WriteLine($"No se pudo crear el splash de inicio: {exception.Message}");
+                return 1;
+            }
         }
 
         if (!SingleInstanceGuard.TryAcquire("Local\\MinimalShell.SingleInstance", out var legacyInstanceGuard))
@@ -160,6 +198,8 @@ internal static class Program
             const string message = "TenchyShell ya está ejecutándose. Cierra la instancia actual antes de iniciar otra.";
             logger.Error(message);
             Console.Error.WriteLine(message);
+            startupProgress?.Close();
+            startupSplash?.Dispose();
             return 1;
         }
 
@@ -169,6 +209,8 @@ internal static class Program
             const string message = "TenchyShell ya está ejecutándose. Cierra la instancia actual antes de iniciar otra.";
             logger.Error(message);
             Console.Error.WriteLine(message);
+            startupProgress?.Close();
+            startupSplash?.Dispose();
             return 1;
         }
 
@@ -177,73 +219,34 @@ internal static class Program
             using (legacyInstanceGuard!)
             using (instanceGuard!)
             {
+                startupProgress?.ReportStarted(
+                    StartupModule.CoreServices,
+                    "Inicializando servicios principales y lanzamiento de procesos");
                 using var shell = new ShellHost(
                     result.Configuration,
                     logger,
                     withoutExplorer,
                     startTui: !withoutTui && packagedDiagnostic is null,
                     effectiveConfigurationPath: effectiveConfigurationPath,
-                    suppressLiveBenchmark: automatedBenchmark);
+                    sessionId: runId,
+                    suppressLiveBenchmark: automatedBenchmark,
+                    startupProgress: startupProgress);
+                startupProgress?.ReportCompleted(StartupModule.CoreServices);
                 return shell.Run(exitAfterSeconds, testNotification, packagedDiagnostic);
             }
         }
-        finally
-        {
-            if (automatedBenchmark)
-            {
-                EnsureExplorerRunning(logger);
-            }
-        }
-    }
-
-    private static void EnsureExplorerRunning(ILogger logger)
-    {
-        var explorer = new ExplorerShellController();
-        var state = explorer.GetCurrentSessionState();
-        if (state.State == ExplorerShellState.Running)
-        {
-            logger.Info("Recuperación automática del benchmark: explorer.exe ya estaba activo como shell.");
-            return;
-        }
-
-        if (state.State != ExplorerShellState.Stopped)
-        {
-            logger.Error($"Recuperación automática del benchmark cancelada para evitar Explorer duplicado. {state.Message}");
-            Console.Error.WriteLine($"No se iniciará explorer.exe automáticamente: {state.Message}");
-            return;
-        }
-
-        using var ownProcess = Process.GetCurrentProcess();
-        var sessionId = ownProcess.SessionId;
-        var allExplorers = Process.GetProcessesByName("explorer");
-        var current = new List<Process>();
-        foreach (var process in allExplorers)
-        {
-            try
-            {
-                if (process.SessionId == sessionId) current.Add(process);
-                else process.Dispose();
-            }
-            catch
-            {
-                process.Dispose();
-            }
-        }
-        foreach (var process in current) process.Dispose();
-
-        try
-        {
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                UseShellExecute = true
-            });
-            logger.Info($"Recuperación automática del benchmark: explorer.exe iniciado (PID: {process?.Id.ToString() ?? "desconocido"}).");
-        }
         catch (Exception exception)
         {
-            logger.Error("La recuperación automática del benchmark no pudo iniciar explorer.exe.", exception);
-            Console.Error.WriteLine($"No se pudo restaurar explorer.exe: {exception.Message}");
+            ReportStartupFailure(startupProgress, exception);
+            startupSplash?.Close();
+            logger.Error("Error no controlado al ejecutar TenchyShell.", exception);
+            Console.Error.WriteLine($"Error no controlado: {exception.Message}");
+            return 1;
+        }
+        finally
+        {
+            startupProgress?.Close();
+            startupSplash?.Dispose();
         }
     }
 
@@ -254,6 +257,7 @@ internal static class Program
             if (args[index].Equals("--launch", StringComparison.OrdinalIgnoreCase) ||
                 args[index].Equals("--session", StringComparison.OrdinalIgnoreCase) ||
                 args[index].Equals("--exit-after-seconds", StringComparison.OrdinalIgnoreCase) ||
+                args[index].Equals("--session-id", StringComparison.OrdinalIgnoreCase) ||
                 args[index].Equals("--diagnose-packaged", StringComparison.OrdinalIgnoreCase) ||
                 args[index].Equals("--activation-context", StringComparison.OrdinalIgnoreCase))
             {
@@ -268,6 +272,38 @@ internal static class Program
         }
 
         return null;
+    }
+
+    private static bool TryGetOptionalArgumentValue(
+        IReadOnlyList<string> args,
+        string option,
+        out string? value,
+        out string? error)
+    {
+        value = null;
+        error = null;
+        var index = -1;
+        for (var current = 0; current < args.Count; current++)
+        {
+            if (!args[current].Equals(option, StringComparison.OrdinalIgnoreCase)) continue;
+            if (index >= 0)
+            {
+                error = $"La opción {option} no puede repetirse.";
+                return false;
+            }
+            index = current;
+        }
+
+        if (index < 0) return true;
+        if (index + 1 >= args.Count || string.IsNullOrWhiteSpace(args[index + 1]) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(args[index + 1], "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
+        {
+            error = $"{option} requiere un identificador alfanumérico válido.";
+            return false;
+        }
+
+        value = args[index + 1];
+        return true;
     }
 
     private static bool TryGetOptionalPositiveInteger(
@@ -320,6 +356,23 @@ internal static class Program
         }
     }
 
+    private static void ReportStartupFailure(StartupProgressState? progress, Exception exception)
+    {
+        if (progress is null) return;
+        var snapshot = progress.Snapshot;
+        if (snapshot.Status == StartupProgressStatus.InProgress && snapshot.CurrentModule is StartupModule module)
+        {
+            try
+            {
+                progress.ReportError(module, $"Falló {module}.", exception);
+            }
+            catch (InvalidOperationException)
+            {
+                // ShellHost puede haber informado ya el error fatal.
+            }
+        }
+    }
+
     private static void ReportStartupDiagnostics(ILogger logger, StartupDiagnosticsResult diagnostics)
     {
         foreach (var diagnostic in diagnostics.Diagnostics)
@@ -349,8 +402,10 @@ internal static class Program
         Console.WriteLine("  TenchyShell.exe --launch terminal|files|browser [config.toml]");
         Console.WriteLine("  TenchyShell.exe --without-explorer [config.toml]");
         Console.WriteLine("  TenchyShell.exe --without-tui [config.toml]");
+        Console.WriteLine("  TenchyShell.exe --keep-splash [config.toml]");
         Console.WriteLine("  TenchyShell.exe --tui <config.toml>");
         Console.WriteLine("  TenchyShell.exe --exit-after-seconds N [config.toml]");
+        Console.WriteLine("  TenchyShell.exe --session-id ID ... (uso interno de diagnóstico)");
         Console.WriteLine("  TenchyShell.exe --diagnose-packaged <AUMID> [--diagnose-packaged <AUMID> ...] [--activation-context in-process|local-server|both] --exit-after-seconds N [config.toml]");
         Console.WriteLine("  TenchyShell.exe --test-notification [config.toml]");
         Console.WriteLine("  TenchyShell.exe --automated-benchmark --without-explorer --exit-after-seconds N [config.toml]");
@@ -360,8 +415,9 @@ internal static class Program
         Console.WriteLine("--without-explorer registra primero los hotkeys y solo debe usarse en una VM o usuario secundario.");
         Console.WriteLine("--exit-after-seconds cierra limpiamente una sesión de benchmark o integración.");
         Console.WriteLine("--test-notification muestra una tarjeta local; requiere benchmark y notificaciones habilitados.");
-        Console.WriteLine("--automated-benchmark exige un cierre acotado y restaura Explorer al terminar.");
+        Console.WriteLine("--automated-benchmark exige un cierre acotado y no restaura Explorer al terminar; la recuperación es manual.");
         Console.WriteLine("--without-tui inicia el shell sin abrir la TUI; --tui ejecuta la interfaz dentro del terminal.");
+        Console.WriteLine("--keep-splash mantiene el splash visible al terminar el arranque; haz clic sobre él para cerrarlo.");
         Console.WriteLine("--diagnose-packaged compara la activación oficial por AUMID sin iniciar Explorer; por defecto prueba ambos contextos COM y no abre la TUI.");
     }
 

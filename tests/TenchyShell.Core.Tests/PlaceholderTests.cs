@@ -521,6 +521,9 @@ public sealed class PlaceholderTests
                 sample_interval_seconds = 15
                 retention_days = 21
                 max_storage_mb = 512
+
+                [logging]
+                console = true
                 """);
 
             var result = new TomlConfigurationProvider(new FileLogger(directory)).Load(path);
@@ -530,6 +533,7 @@ public sealed class PlaceholderTests
             Assert.Equal(15, result.Configuration.Benchmark.SampleIntervalSeconds);
             Assert.Equal(21, result.Configuration.Benchmark.RetentionDays);
             Assert.Equal(512, result.Configuration.Benchmark.MaxStorageMb);
+            Assert.True(result.Configuration.Logging.Console);
         }
         finally
         {
@@ -559,6 +563,7 @@ public sealed class PlaceholderTests
                 var text = File.ReadAllText(file);
                 Assert.Contains("session_started", text, StringComparison.Ordinal);
                 Assert.Contains("test_event", text, StringComparison.Ordinal);
+                Assert.Contains($"\"sessionId\":\"{recorder.SessionId}\"", text, StringComparison.Ordinal);
             }
         }
         finally
@@ -590,6 +595,53 @@ public sealed class PlaceholderTests
             var file = Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl"));
             var lines = File.ReadLines(file).Where(line => line.Contains("\"name\":\"workspace_window_enumeration\"", StringComparison.Ordinal));
             Assert.Single(lines);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LiveBenchmarkRecorderRecordsSafeFileLoggerMetricsWhenEnabled()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var configuration = new BenchmarkConfiguration
+            {
+                Enabled = true,
+                SampleIntervalSeconds = 3600,
+                RetentionDays = 14,
+                MaxStorageMb = 16
+            };
+            using var recorder = new LiveBenchmarkRecorder(configuration, new FileLogger(directory), Path.Combine(directory, "live"));
+            recorder.Start();
+
+            recorder.RecordFileLoggerMetrics(new FileLoggerMetrics(
+                LogCalls: 120,
+                WriteFailures: -1,
+                MaintenanceCalls: 4,
+                ArchiveScans: 4,
+                ArchiveFilesSeen: 18,
+                ArchiveFilesDeleted: 3,
+                RotationsByDay: 1,
+                RotationsBySize: 0,
+                ContentionCount: 2,
+                ContentionWaitMilliseconds: 0.8,
+                WriteDurationP95Milliseconds: 0.35,
+                MaintenanceDurationP95Milliseconds: 1.7,
+                BytesWritten: 145820,
+                ArchiveCountAtEnd: 15));
+
+            var text = File.ReadAllText(Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl")));
+            Assert.Contains("\"name\":\"file_logger_metrics\"", text, StringComparison.Ordinal);
+            Assert.Contains("\"logCalls\":120", text, StringComparison.Ordinal);
+            Assert.Contains("\"writeFailures\":0", text, StringComparison.Ordinal);
+            Assert.Contains("\"archiveFilesDeleted\":3", text, StringComparison.Ordinal);
+            Assert.Contains("\"writeDurationP95Milliseconds\":0.35", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("message", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("path", text, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -654,6 +706,29 @@ public sealed class PlaceholderTests
 
             Assert.Equal(initialLength, new FileInfo(existingPath).Length);
             Assert.Single(Directory.GetFiles(liveDirectory, "live-*.jsonl"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LiveBenchmarkRecorderRecordsAnAbnormalSessionEndOnlyOnce()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var configuration = new BenchmarkConfiguration { Enabled = true, SampleIntervalSeconds = 3600 };
+            using var recorder = new LiveBenchmarkRecorder(configuration, new FileLogger(directory), Path.Combine(directory, "live"));
+            recorder.Start();
+            recorder.EndSession(clean: false, reason: "unhandled_exception");
+            recorder.EndSession(clean: true, reason: "normal");
+
+            var text = File.ReadAllText(Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl")));
+            Assert.Equal(1, text.Split("session_stopped", StringSplitOptions.None).Length - 1);
+            Assert.Contains("unhandled_exception", text, StringComparison.Ordinal);
+            Assert.Contains("\"clean\":false", text, StringComparison.Ordinal);
         }
         finally
         {
@@ -1080,6 +1155,108 @@ public sealed class PlaceholderTests
 
             Assert.True(File.Exists(logger.LogFilePath));
             Assert.Contains("mensaje de prueba", File.ReadAllText(logger.LogFilePath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FileLoggerDoesNotCollectMetricsWhenOptInIsDisabled()
+    {
+        var directory = CreateTemporaryDirectory();
+
+        try
+        {
+            var logger = new FileLogger(directory);
+            logger.Info("mensaje sin benchmark");
+            logger.Error("error sin benchmark");
+
+            var metrics = logger.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.LogCalls);
+            Assert.Equal(0, metrics.MaintenanceCalls);
+            Assert.Equal(0, metrics.ArchiveScans);
+            Assert.Equal(0, metrics.WriteFailures);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FileLoggerDoesNotMaintainArchivesOnEveryWrite()
+    {
+        var directory = CreateTemporaryDirectory();
+
+        try
+        {
+            var logger = new FileLogger(directory) { MetricsEnabled = true };
+            logger.Info("primer mensaje");
+            logger.Info("segundo mensaje");
+            logger.Info("tercer mensaje");
+
+            var metrics = logger.GetMetricsSnapshot();
+            Assert.Equal(3, metrics.LogCalls);
+            Assert.Equal(0, metrics.MaintenanceCalls);
+            Assert.Equal(0, metrics.ArchiveScans);
+            Assert.Equal(0, metrics.RotationsBySize);
+            Assert.True(metrics.BytesWritten > 0);
+            Assert.True(metrics.WriteDurationP95Milliseconds >= 0);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FileLoggerKeepsSizeRotationAndReportsAggregatedMetrics()
+    {
+        var directory = CreateTemporaryDirectory();
+
+        try
+        {
+            var logger = new FileLogger(directory, maximumBytes: 1) { MetricsEnabled = true };
+            logger.Info("primer mensaje");
+            logger.Info("segundo mensaje");
+
+            var metrics = logger.GetMetricsSnapshot();
+            Assert.Equal(2, metrics.LogCalls);
+            Assert.Equal(1, metrics.RotationsBySize);
+            Assert.Equal(1, metrics.MaintenanceCalls);
+            Assert.Equal(1, metrics.ArchiveScans);
+            Assert.Equal(1, metrics.ArchiveFilesSeen);
+            Assert.Equal(0, metrics.ArchiveCountAtEnd);
+            Assert.Empty(Directory.EnumerateFiles(directory, "tenchyshell-*.log"));
+            Assert.Contains("segundo mensaje", File.ReadAllText(logger.LogFilePath));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LiveBenchmarkRecorderPublishesFileLoggerMetricsWithoutLogData()
+    {
+        var directory = CreateTemporaryDirectory();
+
+        try
+        {
+            var logger = new FileLogger(directory, sessionId: "logger-session") { MetricsEnabled = true };
+            logger.Info("mensaje privado que no debe entrar en telemetría");
+            var configuration = new BenchmarkConfiguration { Enabled = true, SampleIntervalSeconds = 3600 };
+            using var recorder = new LiveBenchmarkRecorder(configuration, logger, Path.Combine(directory, "live"), sessionId: "benchmark-session");
+            recorder.RecordFileLoggerMetrics(logger.GetMetricsSnapshot());
+
+            var telemetry = File.ReadAllText(Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl")));
+            Assert.Contains("\"name\":\"file_logger_metrics\"", telemetry, StringComparison.Ordinal);
+            Assert.Contains("\"sessionId\":\"benchmark-session\"", telemetry, StringComparison.Ordinal);
+            Assert.Contains("\"logCalls\":1", telemetry, StringComparison.Ordinal);
+            Assert.DoesNotContain("mensaje privado que no debe entrar en telemetría", telemetry, StringComparison.Ordinal);
+            Assert.DoesNotContain(directory, telemetry, StringComparison.Ordinal);
         }
         finally
         {

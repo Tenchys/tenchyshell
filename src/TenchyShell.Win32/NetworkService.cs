@@ -3,6 +3,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using TenchyShell.Core.Network;
+using TenchyShell.Core.Diagnostics;
 
 namespace TenchyShell.Win32;
 
@@ -12,24 +13,135 @@ public sealed class NetworkService : INetworkService
     private const int WlanInterfaceInfoListHeaderSize = 8;
     private const int WlanAvailableNetworkIncludeAllAdhocProfiles = 0x00000001;
 
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
+    private long maximumWifiNetworks;
+
+    public NetworkService(LiveBenchmarkRecorder? benchmarkRecorder = null)
+    {
+        this.benchmarkRecorder = benchmarkRecorder;
+    }
+
     public NetworkSnapshot GetSnapshot()
     {
+        var benchmarkEnabled = benchmarkRecorder?.IsEnabled == true;
+        Stopwatch? totalStopwatch = benchmarkEnabled ? Stopwatch.StartNew() : null;
+        Stopwatch? interfaceStopwatch = benchmarkEnabled ? Stopwatch.StartNew() : null;
+        Stopwatch? wifiStopwatch = null;
+
+        long ethernetCount = 0;
+        long wifiCount = 0;
+        long vpnCount = 0;
+        long unknownCount = 0;
+        int rawWifiCount = 0;
+        int uniqueWifiCount = 0;
+
         try
         {
-            var interfaces = NetworkInterface.GetAllNetworkInterfaces()
+            var rawInterfaces = NetworkInterface.GetAllNetworkInterfaces()
                 .Where(networkInterface => networkInterface.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                .Select(CreateInterfaceSnapshot)
                 .ToArray();
+            var interfaces = rawInterfaces.Select(CreateInterfaceSnapshot).ToArray();
+
+            foreach (var networkInterface in interfaces)
+            {
+                switch (networkInterface.Kind)
+                {
+                    case NetworkInterfaceKind.Ethernet:
+                        ethernetCount++;
+                        break;
+                    case NetworkInterfaceKind.Wifi:
+                        wifiCount++;
+                        break;
+                    case NetworkInterfaceKind.Vpn:
+                        vpnCount++;
+                        break;
+                    default:
+                        unknownCount++;
+                        break;
+                }
+            }
+
+            if (benchmarkEnabled && interfaceStopwatch is not null)
+            {
+                interfaceStopwatch.Stop();
+            }
 
             var operational = interfaces.Any(networkInterface => networkInterface.IsOperational);
+
+            wifiStopwatch = benchmarkEnabled ? Stopwatch.StartNew() : null;
+            var wifiResult = GetWifiNetworks();
+            if (benchmarkEnabled && wifiStopwatch is not null)
+            {
+                wifiStopwatch.Stop();
+            }
+            rawWifiCount = wifiResult.RawCount;
+            uniqueWifiCount = wifiResult.Networks.Count;
+
+            if (benchmarkEnabled)
+            {
+                UpdateMaximum(ref maximumWifiNetworks, uniqueWifiCount);
+                totalStopwatch?.Stop();
+                var metrics = new NetworkEnumerationMetricsSnapshot(
+                    ethernetCount,
+                    wifiCount,
+                    vpnCount,
+                    unknownCount,
+                    rawWifiCount,
+                    uniqueWifiCount,
+                    Interlocked.Read(ref maximumWifiNetworks),
+                    totalStopwatch?.Elapsed.TotalMilliseconds ?? 0d,
+                    interfaceStopwatch?.Elapsed.TotalMilliseconds ?? 0d,
+                    wifiStopwatch?.Elapsed.TotalMilliseconds ?? 0d,
+                    false);
+                benchmarkRecorder!.RecordNetworkEnumerationMetrics(metrics);
+            }
+
             return new NetworkSnapshot(operational, operational, interfaces, null)
             {
-                WifiNetworks = GetWifiNetworks()
+                WifiNetworks = wifiResult.Networks
             };
         }
         catch (Exception exception)
         {
+            totalStopwatch?.Stop();
+            interfaceStopwatch?.Stop();
+            wifiStopwatch?.Stop();
+            if (benchmarkEnabled)
+            {
+                var metrics = new NetworkEnumerationMetricsSnapshot(
+                    ethernetCount,
+                    wifiCount,
+                    vpnCount,
+                    unknownCount,
+                    rawWifiCount,
+                    uniqueWifiCount,
+                    Interlocked.Read(ref maximumWifiNetworks),
+                    totalStopwatch?.Elapsed.TotalMilliseconds ?? 0d,
+                    interfaceStopwatch?.Elapsed.TotalMilliseconds ?? 0d,
+                    wifiStopwatch?.Elapsed.TotalMilliseconds ?? 0d,
+                    true);
+                try
+                {
+                    benchmarkRecorder!.RecordNetworkEnumerationMetrics(metrics);
+                }
+                catch
+                {
+                    // La telemetria opt-in no puede alterar el resultado funcional.
+                }
+            }
             return new NetworkSnapshot(false, false, Array.Empty<NetworkInterfaceSnapshot>(), exception.Message);
+        }
+    }
+
+    private static void UpdateMaximum(ref long target, long value)
+    {
+        while (true)
+        {
+            var current = Interlocked.Read(ref target);
+            if (value <= current || Interlocked.CompareExchange(ref target, value, current) == current)
+            {
+                return;
+            }
         }
     }
 
@@ -129,16 +241,16 @@ public sealed class NetworkService : INetworkService
         }
     }
 
-    private static IReadOnlyList<WifiNetworkSnapshot> GetWifiNetworks()
+    private static (IReadOnlyList<WifiNetworkSnapshot> Networks, int RawCount) GetWifiNetworks()
     {
         var networks = new List<WifiNetworkSnapshot>();
         var result = WlanOpenHandle(WlanClientVersion, IntPtr.Zero, out _, out var clientHandle);
-        if (result != 0) return networks;
+        if (result != 0) return (networks, networks.Count);
 
         try
         {
             result = WlanEnumInterfaces(clientHandle, IntPtr.Zero, out var interfaceListPointer);
-            if (result != 0 || interfaceListPointer == IntPtr.Zero) return networks;
+            if (result != 0 || interfaceListPointer == IntPtr.Zero) return (networks, networks.Count);
 
             try
             {
@@ -192,12 +304,13 @@ public sealed class NetworkService : INetworkService
             WlanCloseHandle(clientHandle, IntPtr.Zero);
         }
 
-        return networks
+        var deduplicated = networks
             .GroupBy(network => network.Ssid, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderByDescending(network => network.SignalQuality).First())
             .OrderByDescending(network => network.IsConnected)
             .ThenByDescending(network => network.SignalQuality)
             .ToArray();
+        return (deduplicated, networks.Count);
     }
 
     private static NetworkInterfaceKind MapKind(NetworkInterfaceType type, string description)

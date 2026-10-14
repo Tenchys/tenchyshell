@@ -83,7 +83,8 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
         var inputLanguage = GetTable(table, "input_language");
         var wallpaper = GetTable(table, "wallpaper");
         var benchmark = GetTable(table, "benchmark");
-            var notifications = GetTable(table, "notifications");
+        var logging = GetTable(table, "logging");
+        var notifications = GetTable(table, "notifications");
         var dock = GetTable(table, "dock");
         var tui = GetTable(table, "tui");
         var api = GetTable(table, "api");
@@ -197,6 +198,10 @@ public sealed class TomlConfigurationProvider : IConfigurationProvider
                 SampleIntervalSeconds = GetInt(benchmark, "sample_interval_seconds", defaults.Benchmark.SampleIntervalSeconds),
                 RetentionDays = GetInt(benchmark, "retention_days", defaults.Benchmark.RetentionDays),
                 MaxStorageMb = GetInt(benchmark, "max_storage_mb", defaults.Benchmark.MaxStorageMb)
+            },
+            Logging = new LoggingConfiguration
+            {
+                Console = GetBoolean(logging, "console", defaults.Logging.Console)
             },
             Notifications = new NotificationConfiguration
             {

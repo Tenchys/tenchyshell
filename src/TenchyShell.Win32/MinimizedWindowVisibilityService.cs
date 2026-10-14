@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.Windows;
+using CoreWorkspaceWindowSnapshot = TenchyShell.Core.Windows.WorkspaceWindowSnapshot;
 
 namespace TenchyShell.Win32;
 
@@ -62,10 +63,18 @@ public sealed class MinimizedWindowVisibilityService : IMinimizedWindowVisibilit
     {
         if (isDisposed) return;
 
-        workspaceSource.Refresh();
-        foreach (var windowHandle in workspaceSource.GetCurrentWorkspaceWindows())
+        var operation = workspaceSource.CaptureCurrentWorkspaceSnapshot("minimized_sync");
+        foreach (var windowHandle in managedHiddenWindows.ToArray())
         {
-            SynchronizeWindow(windowHandle, workspaceAlreadyRefreshed: true);
+            if (!windowService.WindowExists(windowHandle))
+            {
+                managedHiddenWindows.Remove(windowHandle);
+            }
+        }
+
+        foreach (var snapshot in operation.CurrentWindows)
+        {
+            SynchronizeWindow(snapshot, operation);
         }
     }
 
@@ -114,37 +123,57 @@ public sealed class MinimizedWindowVisibilityService : IMinimizedWindowVisibilit
 
         // WinEvent callbacks deben ser cortos; la consulta y el ShowWindow se
         // ejecutan en el hilo del message loop para serializarlos con workspaces.
-        messageLoop.Post(() => SynchronizeWindow(windowHandle, workspaceAlreadyRefreshed: false));
+        messageLoop.Post(() => SynchronizeWindow(windowHandle));
     }
 
-    private void SynchronizeWindow(IntPtr windowHandle, bool workspaceAlreadyRefreshed)
+    private void SynchronizeWindow(IntPtr windowHandle)
     {
         if (isDisposed) return;
 
-        if (!workspaceAlreadyRefreshed) workspaceSource.Refresh();
-        if (!workspaceSource.GetCurrentWorkspaceWindows().Contains(windowHandle)) return;
+        var operation = workspaceSource.CaptureCurrentWorkspaceSnapshot("minimized_event");
+        var snapshot = operation.CurrentWindows.FirstOrDefault(item => item.Handle == windowHandle);
+        if (snapshot.Handle == IntPtr.Zero) return;
+        SynchronizeWindow(snapshot, operation);
+    }
 
-        var metadata = windowService.GetWindowMetadata(windowHandle);
-        if (!metadata.Exists)
+    private void SynchronizeWindow(CoreWorkspaceWindowSnapshot snapshot, WorkspaceOperationSnapshot operation)
+    {
+        if (isDisposed) return;
+
+        if (!snapshot.Exists)
         {
-            managedHiddenWindows.Remove(windowHandle);
+            managedHiddenWindows.Remove(snapshot.Handle);
             return;
         }
 
-        if (metadata.IsMinimized)
+        if (snapshot.IsMinimized)
         {
-            if (!managedHiddenWindows.Contains(windowHandle) && metadata.IsVisible && metadata.IsOperable)
+            if (!managedHiddenWindows.Contains(snapshot.Handle) && snapshot.IsVisible && snapshot.IsOperable)
             {
-                windowService.SetVisible(windowHandle, visible: false);
-                managedHiddenWindows.Add(windowHandle);
+                if (windowService.RevalidateWindow(snapshot))
+                {
+                    windowService.SetVisible(snapshot.Handle, visible: false);
+                    managedHiddenWindows.Add(snapshot.Handle);
+                }
+                else
+                {
+                    operation.Capture?.RecordRevalidationFailure();
+                }
             }
 
             return;
         }
 
-        if (managedHiddenWindows.Remove(windowHandle))
+        if (managedHiddenWindows.Remove(snapshot.Handle))
         {
-            windowService.SetVisible(windowHandle, visible: true);
+            if (windowService.RevalidateWindow(snapshot))
+            {
+                windowService.SetVisible(snapshot.Handle, visible: true);
+            }
+            else
+            {
+                operation.Capture?.RecordRevalidationFailure();
+            }
         }
     }
 }

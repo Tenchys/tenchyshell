@@ -11,17 +11,20 @@ public sealed class ProcessApplicationLauncher : IApplicationLauncher
     private readonly IPackagedApplicationActivator packagedApplicationActivator;
     private readonly ILogger logger;
     private readonly SessionStabilityMetrics? stabilityMetrics;
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
 
     public ProcessApplicationLauncher(
         IProcessLauncher processLauncher,
         IPackagedApplicationActivator packagedApplicationActivator,
         ILogger logger,
-        SessionStabilityMetrics? stabilityMetrics = null)
+        SessionStabilityMetrics? stabilityMetrics = null,
+        LiveBenchmarkRecorder? benchmarkRecorder = null)
     {
         this.processLauncher = processLauncher;
         this.packagedApplicationActivator = packagedApplicationActivator;
         this.logger = logger;
         this.stabilityMetrics = stabilityMetrics;
+        this.benchmarkRecorder = benchmarkRecorder;
     }
 
     public event EventHandler<PackagedApplicationActivationFailedEventArgs>? PackagedApplicationActivationFailed;
@@ -34,6 +37,15 @@ public sealed class ProcessApplicationLauncher : IApplicationLauncher
         var result = isPackagedApplication
             ? (packagedResult = packagedApplicationActivator.Activate(application)).LaunchResult
             : processLauncher.Launch(new ProcessLaunchRequest(application.Target, application.Arguments));
+        benchmarkRecorder?.Record("application_launch_completed", new
+        {
+            application = application.DisplayName,
+            command = application.Target,
+            arguments = application.Arguments,
+            pid = result.ProcessId,
+            succeeded = result.Succeeded,
+            error = result.Error
+        });
         if (isPackagedApplication)
         {
             stabilityMetrics?.RecordPackagedActivation(result);

@@ -29,6 +29,51 @@ public sealed class Mvp086Tests
     }
 
     [Fact]
+    public void DockLayoutReservesConfirmationSpaceAndUsesLargerRows()
+    {
+        Assert.Equal(22, DockLayoutMetrics.RowHeight);
+        Assert.Equal(95, DockLayoutMetrics.FirstRowTop);
+        Assert.Equal(22, (int)Math.Round(DockLayoutMetrics.BaseRowHeight * 1.15, MidpointRounding.AwayFromZero));
+
+        var categories = new[]
+        {
+            new DockNavigationCategory("sesion", "Sesión", true, new[]
+            {
+                new DockNavigationItem("shutdown", "Apagar", "shutdown", true)
+            })
+        };
+
+        Assert.Equal(147, DockLayoutMetrics.GetDockHeight(0, categories));
+        Assert.True(DockLayoutMetrics.TryGetRow(DockLayoutMetrics.FirstRowTop, out var firstRow));
+        Assert.Equal(0, firstRow);
+        Assert.True(DockLayoutMetrics.TryGetRow(DockLayoutMetrics.FirstRowTop + DockLayoutMetrics.RowHeight, out var secondRow));
+        Assert.Equal(1, secondRow);
+        Assert.False(DockLayoutMetrics.TryGetRow(DockLayoutMetrics.FirstRowTop - 1, out _));
+    }
+
+    [Fact]
+    public void DockNavigationHitTestingMatchesRenderedRowsAfterConfirmationSpace()
+    {
+        var state = DockNavigationState.FromConfiguration(new DockConfiguration
+        {
+            Categories = new[]
+            {
+                new DockCategoryConfiguration
+                {
+                    Id = "sesion", Title = "Sesión", Order = 30,
+                    Items = new[]
+                    {
+                        new DockItemConfiguration { Id = "shutdown", Title = "Apagar", Action = "shutdown" }
+                    }
+                }
+            }
+        });
+
+        Assert.True(state.SelectAt(DockLayoutMetrics.FirstRowTop + DockLayoutMetrics.RowHeight));
+        Assert.Equal("shutdown", state.SelectedItem!.Action);
+    }
+
+    [Fact]
     public async Task SessionConfirmationRequiresSecondMatchingRequestAndRejectsDuplicates()
     {
         var state = new SessionConfirmationStateMachine();

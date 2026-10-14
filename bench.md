@@ -1,7 +1,8 @@
-# Benchmark oficial v3 — TenchyShell 0.8.7
+# Benchmark diagnóstico — TenchyShell Idle
 
-Este procedimiento es para la línea base oficial. Las capturas `-SmokeTest` son
-solo de validación y no deben mezclarse con el lote oficial.
+Este procedimiento es un benchmark externo de diagnóstico. Cada ejecución es
+independiente y deja la sesión sin restauración automática; las capturas no
+deben ejecutarse en la sesión principal.
 
 ## Requisitos de la sesión
 
@@ -12,9 +13,9 @@ Antes de medir:
 - El árbol Git debe estar limpio (`git status --porcelain` no debe mostrar nada).
 - Debe existir una publicación Release `win-x64` correspondiente al commit actual.
 - Cerrar WezTerm, Yazi, navegadores, sincronizadores, juegos y aplicaciones voluntarias.
-- Mantener Explorer disponible al iniciar cada captura.
+- Ejecutar cada captura en una VM o usuario secundario preparado para quedar sin Explorer.
 - Cerrar sesión y volver a entrar antes de cada captura.
-- No cambiar Winlogon ni detener Explorer manualmente.
+- No cambiar Winlogon ni restaurar Explorer desde el benchmark.
 
 ## PowerShell recomendado
 
@@ -64,64 +65,47 @@ manualmente:
 .\scripts\invoke-performance-benchmark.ps1 -SmokeTest
 ```
 
-Las tres fases deben terminar como válidas: `Idle`, `CommonWorkflow` y
-`TenchyShellStress`. Si falla una fase, no iniciar el lote oficial; corregir el
-problema, republicar y repetir el smoke.
+El smoke ejecuta únicamente `TenchyShell / Idle`. Si la captura se guarda pero
+WezTerm/Yazi no terminan cooperativamente, el JSON queda como diagnóstico no
+oficial y el estado registra los PIDs pendientes; cerrar manualmente el árbol
+antes de repetir una captura oficial.
 
-## Captura oficial del lote
+## Captura diagnóstica
 
-Elegir un identificador nuevo y conservarlo durante las cinco ejecuciones:
+Elegir un identificador para relacionar la ejecución:
 
 ```powershell
 $batch = "20260906-release-a"
 ```
 
-Cerrar sesión y volver a entrar antes de cada ejecución. Ejecutar exactamente el
-mismo comando:
+Cerrar sesión y volver a entrar en la VM o usuario secundario. Ejecutar:
 
 ```powershell
 .\scripts\invoke-performance-benchmark.ps1 -BatchId $batch
 ```
 
-El orquestador elegirá automáticamente, una combinación por ejecución:
+El orquestador inicia TenchyShell con `--without-explorer`, verifica que la
+superficie `Shell_TrayWnd` desaparece, abre WezTerm/Yazi para el workload Idle,
+mide procesos hijos y conserva el log, stdout/stderr y telemetría filtrada por
+`sessionId`. `resource-analysis.json` contiene deltas inicial-final y marca
+crecimiento sostenido de memoria, handles o hilos. No pulsar teclas durante la
+captura.
 
-1. `Explorer / Idle`
-2. `TenchyShell / Idle`
-3. `TenchyShell / CommonWorkflow`
-4. `Explorer / CommonWorkflow`
-5. `TenchyShell / TenchyShellStress`
+La captura se guarda antes de la limpieza. Si el foco o la salida cooperativa
+de Yazi fallan, el orquestador no fuerza ningún proceso: conserva el JSON,
+marca `cleanupCompleted=false` en el diagnóstico y devuelve error para impedir
+que se trate como resultado oficial. Cerrar manualmente únicamente los
+procesos del workload antes de repetirla.
 
-Cada ejecución realiza cinco repeticiones, estabilización, acciones automáticas,
-cierre y restauración de Explorer. No pulsar teclas durante la captura.
-
-No usar `-SmokeTest`, `-AllowExistingToolsForSmoke` ni
-`-ManualStressActions` en el lote oficial.
-
-## Resumen y aceptación
-
-Tras la quinta ejecución, generar o regenerar el informe:
-
-```powershell
-$batchPath = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v3\$batch"
-.\scripts\summarize-performance.ps1 `
-  -InputPath $batchPath `
-  -OutputPath (Join-Path $batchPath "summary.md")
-```
-
-El informe es válido únicamente si contiene las cinco combinaciones, cinco
-repeticiones válidas por captura, el mismo commit/entorno/configuración y la
-orquestación completada. Debe mostrar `Core`, `Auxiliary`, `ShellSession`,
-`Tool`, `Total` y la sección `observer` separada.
-
-El PID del recolector nunca debe aparecer en los agregados. Las capturas v2 y los
-smoke tests se conservan como evidencia, pero no forman parte de la línea base
-0.8.7.
+Si TenchyShell no termina, se registra el timeout y se cierra únicamente su
+proceso propio. El benchmark nunca inicia, mata ni restaura Explorer. La
+recuperación posterior es manual mediante el hotkey configurado o el
+procedimiento de la VM.
 
 ## Salida
 
 Los JSON y el informe quedan en:
 
 ```text
-%LOCALAPPDATA%\TenchyShell\benchmarks\v3\<batch>\
+%LOCALAPPDATA%\TenchyShell\benchmarks\diagnostic\<runId>\
 ```
-

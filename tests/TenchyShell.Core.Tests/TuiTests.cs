@@ -1,6 +1,7 @@
 using System.Text;
 using TenchyShell.Core.Configuration;
 using TenchyShell.Core.Logging;
+using TenchyShell.Core.Diagnostics;
 using TenchyShell.Tui;
 using TenchyShell.Core.Yazi;
 using Xunit;
@@ -291,6 +292,79 @@ public sealed class TuiTests
         Assert.Contains("enabled = true", output.ToString());
     }
 
+    [Fact]
+    public async Task BenchmarkingWidgetRunnerWritesOnlySafeAggregateMetrics()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            using var recorder = new LiveBenchmarkRecorder(
+                new BenchmarkConfiguration { Enabled = true, SampleIntervalSeconds = 3600, MaxStorageMb = 16 },
+                new NullLogger(), Path.Combine(directory, "live"));
+            recorder.Start();
+            var runner = new BenchmarkingWidgetCommandRunner(
+                new FixedWidgetRunner(WidgetExecutionResult.Success("secret-output")), recorder);
+
+            var result = await runner.ExecuteAsync(new TuiWidgetConfiguration
+            {
+                Id = "secret-widget-id",
+                Command = "C:\\secret-command.exe",
+                Arguments = ["--token", "secret-value"]
+            });
+
+            Assert.True(result.Succeeded);
+            var path = Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl"));
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            var telemetry = await reader.ReadToEndAsync();
+            Assert.Contains("periodic_execution_metrics", telemetry, StringComparison.Ordinal);
+            Assert.Contains("\"executor\":\"tui\"", telemetry, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-output", telemetry, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-command", telemetry, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-value", telemetry, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-widget-id", telemetry, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BenchmarkingWidgetRunnerReportsAgeSinceLastValidOutput()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            using var recorder = new LiveBenchmarkRecorder(
+                new BenchmarkConfiguration { Enabled = true, SampleIntervalSeconds = 3600, MaxStorageMb = 16 },
+                new NullLogger(), Path.Combine(directory, "live"));
+            recorder.Start();
+            var times = new Queue<DateTimeOffset>([
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddMilliseconds(1500)
+            ]);
+            var runner = new BenchmarkingWidgetCommandRunner(
+                new SequenceWidgetRunner(WidgetExecutionResult.Success("ok"), WidgetExecutionResult.Failure("failed")),
+                recorder,
+                () => times.Dequeue());
+            var widget = new TuiWidgetConfiguration { Id = "widget" };
+
+            await runner.ExecuteAsync(widget);
+            await runner.ExecuteAsync(widget);
+
+            var path = Assert.Single(Directory.GetFiles(recorder.DirectoryPath, "live-*.jsonl"));
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            var telemetry = await reader.ReadToEndAsync();
+            Assert.Contains("\"lastValidOutputAgeMilliseconds\":1500", telemetry, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static string CreateTemporaryDirectory()
     {
         var directory = Path.Combine(Path.GetTempPath(), "TenchyShell.Tests", Guid.NewGuid().ToString("N"));
@@ -303,5 +377,19 @@ public sealed class TuiTests
         public void Info(string message) { }
         public void Error(string message) { }
         public void Error(string message, Exception exception) { }
+    }
+
+    private sealed class FixedWidgetRunner(WidgetExecutionResult result) : IWidgetCommandRunner
+    {
+        public Task<WidgetExecutionResult> ExecuteAsync(TuiWidgetConfiguration widget, CancellationToken cancellationToken = default) =>
+            Task.FromResult(result);
+    }
+
+    private sealed class SequenceWidgetRunner(params WidgetExecutionResult[] results) : IWidgetCommandRunner
+    {
+        private readonly Queue<WidgetExecutionResult> results = new(results);
+
+        public Task<WidgetExecutionResult> ExecuteAsync(TuiWidgetConfiguration widget, CancellationToken cancellationToken = default) =>
+            Task.FromResult(results.Dequeue());
     }
 }

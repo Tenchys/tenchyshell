@@ -40,6 +40,19 @@ function Format-Delta($Value, [string]$Unit = "") {
     return "$number$Unit"
 }
 
+function Get-SafeMetric($Details, [string]$Name) {
+    if ($null -eq $Details) { return $null }
+    $property = $Details.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) { return $null }
+    try {
+        $number = [double]$property.Value
+        if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $null }
+        return [Math]::Max([double]0, $number)
+    } catch {
+        return $null
+    }
+}
+
 function Add-Anomaly([Collections.Generic.List[object]]$Target, $Timestamp, [string]$Source, [string]$Category, [string]$Message = "") {
     $Target.Add([pscustomobject]@{
         Timestamp = $Timestamp
@@ -104,6 +117,9 @@ $samples = [Collections.Generic.List[object]]::new()
 $eventCounts = @{}
 $enumerationDurations = [Collections.Generic.List[double]]::new()
 $anomalies = [Collections.Generic.List[object]]::new()
+$fileLoggerMetrics = $null
+$notificationCenterMetrics = $null
+$notificationSurfaceMetrics = $null
 $sessionFirst = $null
 $sessionLast = $null
 
@@ -138,6 +154,55 @@ foreach ($file in $filesToRead) {
 
         if ($name -eq "workspace_window_enumeration" -and $null -ne $record.details.durationMs) {
             $enumerationDurations.Add([double]$record.details.durationMs)
+        }
+
+        if ($name -eq "file_logger_metrics") {
+            # El evento es un agregado de sesión. Si una fuente lo publica más
+            # de una vez, el último registro representa el estado más reciente.
+            if ($null -eq $fileLoggerMetrics -or $timestamp -ge $fileLoggerMetrics.Timestamp) {
+                $fileLoggerMetrics = [pscustomobject]@{
+                    Timestamp = $timestamp
+                    LogCalls = Get-SafeMetric $record.details "logCalls"
+                    WriteFailures = Get-SafeMetric $record.details "writeFailures"
+                    MaintenanceCalls = Get-SafeMetric $record.details "maintenanceCalls"
+                    ArchiveScans = Get-SafeMetric $record.details "archiveScans"
+                    ArchiveFilesSeen = Get-SafeMetric $record.details "archiveFilesSeen"
+                    ArchiveFilesDeleted = Get-SafeMetric $record.details "archiveFilesDeleted"
+                    RotationsByDay = Get-SafeMetric $record.details "rotationsByDay"
+                    RotationsBySize = Get-SafeMetric $record.details "rotationsBySize"
+                    ContentionCount = Get-SafeMetric $record.details "contentionCount"
+                    ContentionWaitMilliseconds = Get-SafeMetric $record.details "contentionWaitMilliseconds"
+                    WriteDurationP95Milliseconds = Get-SafeMetric $record.details "writeDurationP95Milliseconds"
+                    MaintenanceDurationP95Milliseconds = Get-SafeMetric $record.details "maintenanceDurationP95Milliseconds"
+                    BytesWritten = Get-SafeMetric $record.details "bytesWritten"
+                    ArchiveCountAtEnd = Get-SafeMetric $record.details "archiveCountAtEnd"
+                }
+            }
+        }
+
+        if ($name -eq "notification_center_metrics") {
+            if ($null -eq $notificationCenterMetrics -or $timestamp -ge $notificationCenterMetrics.Timestamp) {
+                $metricNames = @(
+                    "addCount", "addTotalMilliseconds", "addAllocatedBytes", "addMaximumMilliseconds", "addMaximumAllocatedBytes", "addDurationP95Milliseconds",
+                    "getActiveCount", "getActiveTotalMilliseconds", "getActiveAllocatedBytes", "getActiveMaximumMilliseconds", "getActiveMaximumAllocatedBytes", "getActiveDurationP95Milliseconds",
+                    "removeCount", "removeTotalMilliseconds", "removeAllocatedBytes", "removeMaximumMilliseconds", "removeMaximumAllocatedBytes", "removeDurationP95Milliseconds",
+                    "trimCalls", "trimmedItems"
+                )
+                $notificationCenterMetrics = [ordered]@{ Timestamp = $timestamp }
+                foreach ($metricName in $metricNames) { $notificationCenterMetrics[$metricName] = Get-SafeMetric $record.details $metricName }
+            }
+        }
+
+        if ($name -eq "notification_surface_metrics") {
+            if ($null -eq $notificationSurfaceMetrics -or $timestamp -ge $notificationSurfaceMetrics.Timestamp) {
+                $metricNames = @(
+                    "repaints", "iconDecodeAttempts", "totalIconDecodeDurationMilliseconds", "maximumIconDecodeDurationMilliseconds",
+                    "totalPaintDurationMilliseconds", "maximumPaintDurationMilliseconds", "p95PaintDurationMilliseconds",
+                    "iconBytesPresentedToDecoder", "iconBytesWritten"
+                )
+                $notificationSurfaceMetrics = [ordered]@{ Timestamp = $timestamp }
+                foreach ($metricName in $metricNames) { $notificationSurfaceMetrics[$metricName] = Get-SafeMetric $record.details $metricName }
+            }
         }
 
         $isAnomaly = $name -in @("fatal_error", "explorer_recovery_blocked", "explorer_recovery_failed", "window_focus_attach_failed")
@@ -216,6 +281,51 @@ if ($eventCounts.Count -eq 0) {
 if ($enumerationDurations.Count -gt 0) {
     $durations = $enumerationDurations.ToArray()
     Write-Output ("Enumeración de ventanas (ms): muestras {0}; mediana {1}; P95 {2}; máximo {3}" -f $durations.Count, (Format-Number (Get-Percentile $durations 0.5)), (Format-Number (Get-Percentile $durations 0.95)), (Format-Number (($durations | Measure-Object -Maximum).Maximum)))
+}
+
+Write-Output ""
+Write-Output "Centro de notificaciones"
+if ($null -eq $notificationCenterMetrics) {
+    Write-Output "Sin métricas notification_center_metrics en esta sesión."
+} else {
+    foreach ($metricName in @("add", "getActive", "remove")) {
+        $prefix = $metricName
+        $label = switch ($metricName) { "add" { "Añadir" } "getActive" { "Consultar activas" } "remove" { "Eliminar" } }
+        Write-Output ("{0}: llamadas {1}; total {2} ms; asignados {3} bytes; máximo {4} ms / {5} bytes; P95 {6} ms" -f $label,
+            (Format-Number $notificationCenterMetrics[($prefix + "Count")] 0),
+            (Format-Number $notificationCenterMetrics[($prefix + "TotalMilliseconds")]),
+            (Format-Number $notificationCenterMetrics[($prefix + "AllocatedBytes")] 0),
+            (Format-Number $notificationCenterMetrics[($prefix + "MaximumMilliseconds")]),
+            (Format-Number $notificationCenterMetrics[($prefix + "MaximumAllocatedBytes")] 0),
+            (Format-Number $notificationCenterMetrics[($prefix + "DurationP95Milliseconds")]))
+    }
+    Write-Output ("Recorte: llamadas {0}; elementos descartados {1}" -f (Format-Number $notificationCenterMetrics.trimCalls 0), (Format-Number $notificationCenterMetrics.trimmedItems 0))
+}
+
+Write-Output ""
+Write-Output "Superficie de notificaciones"
+if ($null -eq $notificationSurfaceMetrics) {
+    Write-Output "Sin métricas notification_surface_metrics en esta sesión."
+} else {
+    foreach ($metricName in @("repaints", "iconDecodeAttempts", "totalIconDecodeDurationMilliseconds", "maximumIconDecodeDurationMilliseconds", "totalPaintDurationMilliseconds", "maximumPaintDurationMilliseconds", "p95PaintDurationMilliseconds", "iconBytesPresentedToDecoder", "iconBytesWritten")) {
+        Write-Output ("{0}: {1}" -f $metricName, (Format-Number $notificationSurfaceMetrics[$metricName] 2))
+    }
+}
+
+Write-Output ""
+Write-Output "Logger de archivos"
+if ($null -eq $fileLoggerMetrics) {
+    Write-Output "Sin métricas file_logger_metrics en esta sesión."
+} else {
+    $maintenancePerLogCall = if ($fileLoggerMetrics.LogCalls -gt 0 -and $null -ne $fileLoggerMetrics.MaintenanceCalls) {
+        $fileLoggerMetrics.MaintenanceCalls / $fileLoggerMetrics.LogCalls
+    } else { $null }
+    Write-Output ("Llamadas de log: {0}; fallos de escritura: {1}; bytes escritos: {2}" -f (Format-Number $fileLoggerMetrics.LogCalls 0), (Format-Number $fileLoggerMetrics.WriteFailures 0), (Format-Number $fileLoggerMetrics.BytesWritten 0))
+    Write-Output ("Mantenimientos: {0}; por llamada: {1}; enumeraciones de archivados: {2}" -f (Format-Number $fileLoggerMetrics.MaintenanceCalls 0), (Format-Number $maintenancePerLogCall 4), (Format-Number $fileLoggerMetrics.ArchiveScans 0))
+    Write-Output ("Archivos archivados vistos: {0}; eliminados: {1}; al final: {2}" -f (Format-Number $fileLoggerMetrics.ArchiveFilesSeen 0), (Format-Number $fileLoggerMetrics.ArchiveFilesDeleted 0), (Format-Number $fileLoggerMetrics.ArchiveCountAtEnd 0))
+    Write-Output ("Rotaciones por día: {0}; por tamaño: {1}" -f (Format-Number $fileLoggerMetrics.RotationsByDay 0), (Format-Number $fileLoggerMetrics.RotationsBySize 0))
+    Write-Output ("Contención: {0}; espera acumulada: {1} ms" -f (Format-Number $fileLoggerMetrics.ContentionCount 0), (Format-Number $fileLoggerMetrics.ContentionWaitMilliseconds 2))
+    Write-Output ("P95 escritura: {0} ms; P95 mantenimiento: {1} ms" -f (Format-Number $fileLoggerMetrics.WriteDurationP95Milliseconds 2), (Format-Number $fileLoggerMetrics.MaintenanceDurationP95Milliseconds 2))
 }
 
 Write-Output ""

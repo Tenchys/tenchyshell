@@ -135,10 +135,30 @@ public sealed class ExplorerShellControllerTests
     }
 
     [Fact]
-    public void TryExitCurrentSessionAllowsTenchyShellToContinueWithResidualExplorerProcess()
+    public void TryExitCurrentSessionRetriesResidualProcessAndEventuallySucceeds()
     {
-        var platform = new FakePlatform([42]);
-        platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, IntPtr.Zero);
+        var platform = new FakePlatform([42], [42], [42], [42], [42], [], []);
+        platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        var controller = new ExplorerShellController(platform);
+
+        var result = controller.TryExitCurrentSession(
+            TimeSpan.FromMilliseconds(3),
+            TimeSpan.FromMilliseconds(2),
+            Millisecond);
+
+        Assert.True(result.Succeeded, result.Message);
+        Assert.True(result.CanContinueWithoutExplorer);
+        Assert.Equal(ExplorerShellState.Stopped, result.State);
+        Assert.Contains("Intentos previos", result.Message, StringComparison.Ordinal);
+        Assert.Equal(1, platform.PostCount);
+        Assert.Contains(TimeSpan.FromSeconds(2), platform.Delays);
+    }
+
+    [Fact]
+    public void TryExitCurrentSessionRequiresTrayAndProcessesToStayAbsentForStablePeriod()
+    {
+        var platform = new FakePlatform([42], [42], [42], [], []);
+        platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         var controller = new ExplorerShellController(platform);
 
         var result = controller.TryExitCurrentSession(
@@ -146,12 +166,41 @@ public sealed class ExplorerShellControllerTests
             TimeSpan.FromMilliseconds(2),
             Millisecond);
 
+        Assert.True(result.Succeeded, result.Message);
+        Assert.Equal(ExplorerShellState.Stopped, result.State);
+        Assert.Null(result.ProcessId);
+        Assert.Equal(4, platform.DelayCount);
+    }
+
+    [Fact]
+    public void TryExitCurrentSessionRequestsExitAgainWhenTrayReappearsBetweenAttempts()
+    {
+        var platform = new FakePlatform([42], [42], [42], []);
+        platform.SetTrayWindows(new IntPtr(1234), IntPtr.Zero, new IntPtr(5678), IntPtr.Zero);
+        var controller = new ExplorerShellController(platform);
+
+        var result = controller.TryExitCurrentSession(Millisecond, Millisecond, Millisecond);
+
+        Assert.True(result.Succeeded, result.Message);
+        Assert.Equal(ExplorerShellState.Stopped, result.State);
+        Assert.Equal(2, platform.PostCount);
+        Assert.Equal(1, platform.Delays.Count(duration => duration == TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public void TryExitCurrentSessionFailsAfterFourAttemptsAndNeverTerminatesProcess()
+    {
+        var platform = new FakePlatform([42]);
+        var controller = new ExplorerShellController(platform);
+
+        var result = controller.TryExitCurrentSession(Millisecond, Millisecond, Millisecond);
+
         Assert.False(result.Succeeded);
-        Assert.True(result.CanContinueWithoutExplorer);
-        Assert.Equal(42, result.ProcessId);
-        Assert.Equal(ExplorerShellState.ResidualProcess, result.State);
-        Assert.Contains("proceso residual", result.Message, StringComparison.Ordinal);
-        Assert.Equal(1, platform.PostCount);
+        Assert.False(result.CanContinueWithoutExplorer);
+        Assert.Equal(ExplorerShellState.Running, result.State);
+        Assert.Contains("Se agotaron 4 intentos", result.Message, StringComparison.Ordinal);
+        Assert.Equal(4, platform.PostCount);
+        Assert.Equal(3, platform.Delays.Count(duration => duration == TimeSpan.FromSeconds(2)));
     }
 
     private static WorkspaceWindowSnapshot CreateWorkspaceWindow(
@@ -184,7 +233,7 @@ public sealed class ExplorerShellControllerTests
             Millisecond);
 
         Assert.False(result.Succeeded);
-        Assert.Contains("relanzó", result.Message, StringComparison.Ordinal);
+        Assert.Contains("PID 99", result.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -228,7 +277,7 @@ public sealed class ExplorerShellControllerTests
         var result = controller.GetCurrentSessionState();
 
         Assert.False(result.Succeeded);
-        Assert.True(result.CanContinueWithoutExplorer);
+        Assert.False(result.CanContinueWithoutExplorer);
         Assert.Equal(ExplorerShellState.ResidualProcess, result.State);
         Assert.Equal(42, result.ProcessId);
     }
@@ -256,7 +305,7 @@ public sealed class ExplorerShellControllerTests
 
         Assert.False(result.Succeeded);
         Assert.Contains("error Win32 5", result.Message, StringComparison.Ordinal);
-        Assert.Equal(1, platform.PostCount);
+        Assert.Equal(4, platform.PostCount);
     }
 
     [Fact]
@@ -287,7 +336,7 @@ public sealed class ExplorerShellControllerTests
 
         Assert.False(result.Succeeded);
         Assert.Contains("Shell_TrayWnd", result.Message, StringComparison.Ordinal);
-        Assert.Equal(2, platform.DelayCount);
+        Assert.Equal(11, platform.DelayCount);
     }
 
     private sealed class FakePlatform(params int[][] processSamples) : IExplorerShellPlatform
@@ -302,6 +351,7 @@ public sealed class ExplorerShellControllerTests
         public bool PostSucceeds { get; set; } = true;
         public int PostCount { get; private set; }
         public int DelayCount { get; private set; }
+        public List<TimeSpan> Delays { get; } = [];
 
         public void SetTrayWindows(params IntPtr[] samples)
         {
@@ -338,8 +388,8 @@ public sealed class ExplorerShellControllerTests
 
         public void Delay(TimeSpan duration)
         {
-            Assert.Equal(Millisecond, duration);
             DelayCount++;
+            Delays.Add(duration);
         }
     }
 

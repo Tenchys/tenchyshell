@@ -26,6 +26,10 @@ New-Item -ItemType Directory -Path (Join-Path $output "scripts") -Force | Out-Nu
 Copy-Item (Join-Path $repoRoot "scripts\mouse-battery.example.ps1") (Join-Path $output "scripts\mouse-battery.example.ps1") -Force
 Copy-Item (Join-Path $repoRoot "scripts\summarize-live-telemetry.ps1") (Join-Path $output "scripts\summarize-live-telemetry.ps1") -Force
 
+$assetsOutput = Join-Path $output "Assets"
+New-Item -ItemType Directory -Path $assetsOutput -Force | Out-Null
+Copy-Item (Join-Path $repoRoot "assert\ChatGPT Image 8 sept 2026, 12_10_28 a.m.png") (Join-Path $assetsOutput "TenchyShellSplash.png") -Force
+
 $gitCommit = $null
 $gitDirty = $null
 $safeRepoRoot = $repoRoot.Replace('\', '/')

@@ -1,5 +1,7 @@
 namespace TenchyShell.Core.Notifications;
 
+using TenchyShell.Core.Diagnostics;
+
 /// <summary>Representación acotada de una notificación de una aplicación Windows.</summary>
 public sealed record ShellNotification(
     string Id,
@@ -44,6 +46,9 @@ public sealed class NotificationCenter
 
     private readonly object syncRoot = new();
     private readonly Dictionary<string, ShellNotification> items = new(StringComparer.Ordinal);
+    private readonly NotificationCenterMetrics? metrics;
+
+    public NotificationCenter(NotificationCenterMetrics? metrics = null) => this.metrics = metrics is { IsEnabled: true } ? metrics : null;
 
     public event EventHandler<NotificationCenterChangedEventArgs>? Changed;
 
@@ -51,14 +56,53 @@ public sealed class NotificationCenter
 
     public IReadOnlyList<ShellNotification> GetActive()
     {
+        if (metrics is null)
+        {
+            lock (syncRoot)
+            {
+                return items.Values.OrderByDescending(item => item.CreatedAt).ToArray();
+            }
+        }
+
+        var started = metrics.StartTimestamp();
+        var allocated = metrics.StartAllocationCount();
         lock (syncRoot)
         {
-            return items.Values.OrderByDescending(item => item.CreatedAt).ToArray();
+            try
+            {
+                return items.Values.OrderByDescending(item => item.CreatedAt).ToArray();
+            }
+            finally
+            {
+                metrics.RecordGetActive(started, allocated);
+            }
         }
     }
 
     public void Add(ShellNotification notification, bool showPopup = true)
     {
+        if (metrics is null)
+        {
+            AddCore(notification, showPopup, out _);
+            return;
+        }
+
+        var started = metrics.StartTimestamp();
+        var allocated = metrics.StartAllocationCount();
+        var trimmed = 0;
+        try
+        {
+            AddCore(notification, showPopup, out trimmed);
+        }
+        finally
+        {
+            metrics.RecordAdd(started, allocated, trimmed);
+        }
+    }
+
+    private void AddCore(ShellNotification notification, bool showPopup, out int trimmed)
+    {
+        trimmed = 0;
         var normalized = notification.Normalize();
         lock (syncRoot)
         {
@@ -69,13 +113,33 @@ public sealed class NotificationCenter
                          .Select(item => item.Id)
                          .ToArray())
             {
-                items.Remove(expired);
+                if (items.Remove(expired)) trimmed++;
             }
         }
         Changed?.Invoke(this, new NotificationCenterChangedEventArgs(normalized.Id, Added: true, ShowPopup: showPopup));
     }
 
     public void Remove(string notificationId)
+    {
+        if (metrics is null)
+        {
+            RemoveCore(notificationId);
+            return;
+        }
+
+        var started = metrics.StartTimestamp();
+        var allocated = metrics.StartAllocationCount();
+        try
+        {
+            RemoveCore(notificationId);
+        }
+        finally
+        {
+            metrics.RecordRemove(started, allocated);
+        }
+    }
+
+    private void RemoveCore(string notificationId)
     {
         if (string.IsNullOrWhiteSpace(notificationId)) return;
         var removed = false;

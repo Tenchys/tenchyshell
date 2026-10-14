@@ -55,11 +55,11 @@ Verificar que existan `publish/TenchyShell/Debug/win-x64/TenchyShell.dll`, `publ
   estado de consulta; la enumeración WLAN se completa después sin congelar el
   teclado, el mouse ni el message loop.
 - [ ] Antes del Día 0, publicar Release desde un árbol limpio, ejecutar la suite,
-  `scripts/test-performance.ps1` y los smoke tests `Idle`, `CommonWorkflow` y
-  `TenchyShellStress`; comprobar cierre limpio y restauración de Explorer.
-- [ ] Ejecutar las cinco mediciones v3 descritas en `docs/PERFORMANCE.md`, con
-  cinco repeticiones por escenario y fase, y generar `summary.md` fuera del
-  repositorio.
+  `scripts/test-performance.ps1` y el smoke test `TenchyShell / Idle`; comprobar
+  la ausencia de `Shell_TrayWnd` y la ruta de recuperación manual.
+- [ ] Ejecutar la medición oficial `TenchyShell / Idle` descrita en
+  `docs/PERFORMANCE.md`, con cinco repeticiones, y conservar el JSON, el estado
+  de limpieza y el análisis de recursos fuera del repositorio.
 - [ ] Confirmar que `summary.md` muestra `Core`, `ShellSession` y el observador,
   que el PID del observador no participa en ningún agregado y que el modo
   automatizado no crea ni amplía archivos de telemetría live.
@@ -90,6 +90,11 @@ Verificar que existan `publish/TenchyShell/Debug/win-x64/TenchyShell.dll`, `publ
 - [ ] Con `[benchmark] enabled = true` y `[notifications] enabled = true`, iniciar con `--test-notification` y comprobar que se muestra una sola tarjeta local. Sin benchmark o sin notificaciones, el argumento debe rechazar el inicio con un error claro.
 - [ ] Comprobar que la tarjeta muestra el icono de la aplicación si Windows lo entrega; si no existe o es inválido, la notificación sigue siendo legible.
 - [ ] Abrir `Notificaciones` desde la bandeja, verificar el historial de la sesión y descartar un elemento. La aplicación origen conserva el descarte y no se activa ningún contenido.
+- [ ] Con el emisor MSIX instalado y el flujo real habilitado, emitir un burst de notificaciones y comprobar que las tarjetas se presentan sin bloquear el teclado/message loop, que el orden del historial es estable y que se respeta el límite de 100 elementos.
+- [ ] Repetir los escenarios con icono disponible, icono ausente y recurso de icono inválido; en todos los casos la tarjeta sigue siendo legible y los recursos se liberan al retirar, expirar o cerrar la tarjeta.
+- [ ] Retirar una notificación desde la tarjeta y desde el historial; dejar otra expirar y cerrar la superficie con una tarjeta visible. Confirmar que no quedan tarjetas/timers activos ni errores no recuperables.
+- [ ] Con `[notifications] enabled = false`, iniciar el shell y confirmar que no se inicia el bridge, la superficie ni timers de notificaciones, no aparece historial visible y no se emite telemetría de notificaciones.
+- [ ] Para la comparación de rendimiento, medir baseline y variante en Release con cinco repeticiones del flujo real MSIX/pipe, mismo burst y condiciones; conservar resultados fuera del repositorio. Si no hay entorno controlado Windows 11, registrar la comparación como pendiente y no afirmar mejora ni añadir caché.
 - [ ] En la bandeja, `Red` muestra el estado de las interfaces y `Enter` actualiza el centro propio sin iniciar Explorer.
 - [ ] Si existe Wi-Fi, `Red` lista cada SSID con porcentaje de señal, protección y `[Conectar]`/`[Desconectar]`; seleccionar la acción actualiza el estado sin iniciar Explorer.
 - [ ] Si existe Ethernet activa, `Red` indica `Cable`, la IP IPv4 y la velocidad negociada (`100 Mb/s`, `1 Gb/s` o similar), y permite `[Desconectar]`.
@@ -109,8 +114,15 @@ Solo en una VM o usuario secundario:
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-explorer config/TenchyShell.without-explorer.example.toml
 ```
 
-- [ ] Iniciar el perfil sin Explorer y confirmar que `Shell_TrayWnd` desaparece tras registrar el hotkey de recuperación, sin solicitar escribir `DETENER`. Si ya estaba ausente por un intento anterior, TenchyShell continúa sin solicitar otra salida. `explorer.exe` puede permanecer como proceso residual sin bandeja; no se termina a la fuerza.
+En este perfil, TenchyShell espera que desaparezcan tanto `Shell_TrayWnd`
+como todos los procesos `explorer.exe` de la sesión y exige que ambas
+condiciones permanezcan estables durante 2 segundos. Realiza un intento
+inicial y hasta tres reintentos, con 2 segundos entre ellos; si Explorer no
+termina, aborta el arranque antes de iniciar la sesión normal.
+
+- [ ] Iniciar el perfil sin Explorer y confirmar que `Shell_TrayWnd` desaparece tras registrar el hotkey de recuperación, que no queda ningún `explorer.exe` en la sesión y que ambas condiciones permanecen estables durante 2 segundos. Si Explorer no termina tras los cuatro intentos, TenchyShell aborta con un mensaje recuperable; no se termina ningún proceso a la fuerza.
 - [ ] Confirmar que el modo no cambia Winlogon ni mata automáticamente una nueva instancia de Explorer iniciada por Windows; la recuperación sigue siendo manual mediante el hotkey.
+- [ ] No considerar válido el inicio si queda un proceso residual: comprobar en el Administrador de tareas que no existe ningún `explorer.exe` antes de probar los módulos.
 - [ ] Probar launcher, terminal, Yazi, navegador y cierre de ventana.
 - [ ] Pulsar `Ctrl+Alt+Shift+E` y comprobar que Explorer vuelve a iniciarse.
 - [ ] Pulsar `Ctrl+Alt+T`; confirmar que no inicia Explorer, muestra la bandeja propia y se cierra con `Escape`.

@@ -37,7 +37,7 @@ public sealed class DockNavigationState
     }
     public void MoveCategory(int delta) { if (categories.Count == 0) return; CategoryIndex = Mod(CategoryIndex + delta, categories.Count); ItemIndex = 0; }
     public void MoveItem(int delta) { var count = SelectedCategory?.Items.Count ?? 0; if (count > 0) ItemIndex = Mod(ItemIndex + delta, count); }
-    public bool SelectAt(int y, int firstRow = 76, int rowHeight = 19)
+    public bool SelectAt(int y, int firstRow = DockLayoutMetrics.FirstRowTop, int rowHeight = DockLayoutMetrics.RowHeight)
     {
         if (y < firstRow || rowHeight <= 0) return false;
         var row = (y - firstRow) / rowHeight;

@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.Notifications;
 
@@ -31,20 +33,26 @@ public sealed class NotificationWindow : IDisposable
     private readonly IntPtr moduleHandle;
     private readonly List<VisibleNotification> cards = new();
     private readonly string iconDirectory;
+    private readonly NotificationSurfaceMetrics? surfaceMetrics;
+    private readonly Action<NotificationSurfaceMetricsSnapshot>? publishMetrics;
     private IntPtr windowHandle;
     private ushort windowClassAtom;
     private bool disposed;
+    private int metricsPublished;
 
     public NotificationWindow(
         NotificationCenter notificationCenter,
         ILogger logger,
         MessageLoopHost messageLoop,
-        DesktopAreaPolicy desktopAreaPolicy)
+        DesktopAreaPolicy desktopAreaPolicy,
+        Action<NotificationSurfaceMetricsSnapshot>? publishMetrics = null)
     {
         this.notificationCenter = notificationCenter;
         this.logger = logger;
         this.messageLoop = messageLoop;
         this.desktopAreaPolicy = desktopAreaPolicy;
+        this.publishMetrics = publishMetrics;
+        surfaceMetrics = publishMetrics is null ? null : new NotificationSurfaceMetrics();
         windowProcedure = WindowProcedure;
         moduleHandle = NativeMethods.GetModuleHandle(null);
         iconDirectory = Path.Combine(
@@ -56,6 +64,7 @@ public sealed class NotificationWindow : IDisposable
     public void Dispose()
     {
         if (disposed) return;
+        RecordMetrics();
         disposed = true;
         notificationCenter.Changed -= OnNotificationChanged;
         if (windowHandle != IntPtr.Zero)
@@ -78,6 +87,20 @@ public sealed class NotificationWindow : IDisposable
             logger.Error("No se pudo limpiar la caché temporal de iconos de notificaciones.", exception);
         }
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Publica una sola vez el agregado opt-in de la superficie.</summary>
+    public void RecordMetrics()
+    {
+        if (surfaceMetrics is null || publishMetrics is null || Interlocked.Exchange(ref metricsPublished, 1) != 0) return;
+        try
+        {
+            publishMetrics(surfaceMetrics.Snapshot());
+        }
+        catch (Exception exception)
+        {
+            logger.Error("No se pudieron publicar las métricas agregadas de notificaciones.", exception);
+        }
     }
 
     private void OnNotificationChanged(object? sender, NotificationCenterChangedEventArgs args)
@@ -104,15 +127,17 @@ public sealed class NotificationWindow : IDisposable
             var notification = notificationCenter.GetActive().FirstOrDefault(item => item.Id.Equals(args.NotificationId, StringComparison.Ordinal));
             if (notification is not null && cards.Count < MaximumVisibleCards)
             {
-                cards.Add(new VisibleNotification(notification, DateTimeOffset.UtcNow.Add(DisplayDuration), SaveIcon(notification)));
+                var iconPath = SaveIcon(notification, out var iconBytes);
+                cards.Add(new VisibleNotification(notification, DateTimeOffset.UtcNow.Add(DisplayDuration), iconPath, iconBytes));
                 logger.Info($"Tarjeta de notificación preparada: '{notification.Title}'.");
             }
         }
         UpdateWindow();
     }
 
-    private string? SaveIcon(ShellNotification notification)
+    private string? SaveIcon(ShellNotification notification, out long iconBytes)
     {
+        iconBytes = 0;
         if (notification.IconPng is not { Length: > 0 }) return null;
         try
         {
@@ -120,6 +145,8 @@ public sealed class NotificationWindow : IDisposable
             var name = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(notification.Id)))[..16];
             var path = Path.Combine(iconDirectory, $"{name}.png");
             File.WriteAllBytes(path, notification.IconPng);
+            surfaceMetrics?.RecordIconBytesWritten(notification.IconPng.LongLength);
+            iconBytes = notification.IconPng.LongLength;
             return path;
         }
         catch (Exception exception)
@@ -228,6 +255,7 @@ public sealed class NotificationWindow : IDisposable
 
     private void Paint(IntPtr hWnd)
     {
+        var paintStarted = surfaceMetrics is null ? 0 : Stopwatch.GetTimestamp();
         var context = NativeMethods.BeginPaint(hWnd, out var paint);
         var font = NativeMethods.GetStockObject(NativeMethods.DEFAULT_GUI_FONT);
         var previousFont = font == IntPtr.Zero ? IntPtr.Zero : NativeMethods.SelectObject(context, font);
@@ -243,7 +271,15 @@ public sealed class NotificationWindow : IDisposable
                 NativeMethods.DeleteObject(brush);
 
                 var card = cards[index];
-                if (!string.IsNullOrWhiteSpace(card.IconPath)) GdiPlusImage.Draw(context, card.IconPath, Margin, top + CardPadding, 32, 32);
+                if (!string.IsNullOrWhiteSpace(card.IconPath))
+                {
+                    var decodeStarted = surfaceMetrics is null ? 0 : Stopwatch.GetTimestamp();
+                    GdiPlusImage.Draw(context, card.IconPath, Margin, top + CardPadding, 32, 32);
+                    if (surfaceMetrics is not null)
+                    {
+                        surfaceMetrics.RecordIconDecode(Stopwatch.GetElapsedTime(decodeStarted), card.IconBytes);
+                    }
+                }
                 NativeMethods.SetBkMode(context, (int)NativeMethods.TRANSPARENT);
                 var textLeft = layout.TextLeft;
                 var textRight = Width - Margin;
@@ -267,6 +303,7 @@ public sealed class NotificationWindow : IDisposable
         {
             if (previousFont != IntPtr.Zero) NativeMethods.SelectObject(context, previousFont);
             NativeMethods.EndPaint(hWnd, ref paint);
+            if (surfaceMetrics is not null) surfaceMetrics.RecordPaint(Stopwatch.GetElapsedTime(paintStarted));
         }
     }
 
@@ -308,7 +345,7 @@ public sealed class NotificationWindow : IDisposable
         return Math.Max(16, rect.Bottom - rect.Top);
     }
 
-    private sealed record VisibleNotification(ShellNotification Notification, DateTimeOffset ExpiresAt, string? IconPath)
+    private sealed record VisibleNotification(ShellNotification Notification, DateTimeOffset ExpiresAt, string? IconPath, long IconBytes)
     {
         public CardLayout Layout { get; set; } = CardLayout.Minimum;
     }

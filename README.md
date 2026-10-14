@@ -11,15 +11,17 @@ terceros conservan sus propias licencias.
 
 ## Estado actual
 
-El MVP 0.7 consolida el producto bajo el nombre TenchyShell. Incluye el
-message loop Win32, recuperación de Explorer, launcher, workspaces, gestión y
-layout de ventanas, panel, bandeja propia, red, fondos e idioma de teclado. La
-aplicación mantiene una única instancia compatible con el mutex heredado y las
-consultas de red del dock se ejecutan fuera del message loop.
+TenchyShell 0.8.9 consolida el producto bajo su identidad actual. Incluye el
+message loop Win32, recuperación explícita de Explorer, launcher, workspaces,
+gestión y layout de ventanas, panel, bandeja propia, red, fondos e idioma de
+teclado. La aplicación mantiene una única instancia compatible con el mutex
+heredado y las consultas de red del dock se ejecutan fuera del message loop.
 
-El hito 0.8.1 permite desactivar de forma independiente el dock y el buscador
-de aplicaciones desde `[OPTIONALS]`, sin afectar la bandeja propia ni la ruta
-de recuperación.
+Las superficies opcionales del dock y del buscador de aplicaciones pueden
+desactivarse independientemente desde `[OPTIONALS]`, sin afectar la bandeja
+propia ni la ruta de recuperación. El inicio interactivo normal muestra un
+splash nativo temporal con el progreso real de preparación; se libera antes de
+la sesión normal y no crea un segundo message loop.
 
 ## Documentación
 
@@ -116,6 +118,10 @@ dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --check confi
 
 # Ejecutar una sesión acotada que se cierra limpiamente (benchmarks/integración)
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --exit-after-seconds 60 config/TenchyShell.example.toml
+
+# Mantener el splash de inicio tras preparar la sesión (capturas manuales)
+# Haz clic sobre el splash para cerrarlo sin detener TenchyShell.
+dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --keep-splash --without-tui config/TenchyShell.example.toml
 
 # Probar un lanzamiento concreto sin iniciar el message loop
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --launch terminal
@@ -217,16 +223,19 @@ Los perfiles antiguos también pueden seguir pasándose explícitamente por ruta
 ## Rendimiento
 
 El protocolo, las métricas y los criterios para aceptar optimizaciones están en
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Los datos crudos se guardan en
-`%LOCALAPPDATA%\TenchyShell\benchmarks\v3\<batch-id>\` y no se versionan porque
-contienen metadatos de la máquina y de sus procesos. Antes de una captura
-oficial puede verificarse el instrumental con
-`scripts\test-performance.ps1`; los smoke tests quedan marcados como no
-oficiales y no pueden mezclarse con la comparativa final.
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). El orquestador actual guarda cada
+captura `TenchyShell / Idle` en
+`%LOCALAPPDATA%\TenchyShell\benchmarks\diagnostic\<run-id>\` y no versiona esos
+datos porque contienen metadatos de la máquina y de sus procesos. Antes de una
+captura oficial puede verificarse el instrumental con
+`scripts\test-performance.ps1`; si la limpieza de WezTerm/Yazi falla, el JSON
+se conserva como diagnóstico no oficial con el detalle de los procesos
+pendientes.
 
 El esquema v3 identifica el núcleo por PID, muestra por separado `Core` y
-`ShellSession`, excluye y cuantifica al observador PowerShell/CIM y suprime la
-telemetría live durante `--automated-benchmark`. Las capturas v2 permanecen
+`ShellSession`, excluye y cuantifica al observador PowerShell/CIM. El benchmark
+diagnóstico conserva la telemetría live durante `--automated-benchmark` y copia
+los artefactos por ejecución. Las capturas v2 permanecen
 solo como evidencia histórica y no son línea base válida para el hito 0.8.7.
 
 Para observar un flujo de trabajo real instalado, habilita `[benchmark]` en el
@@ -340,7 +349,7 @@ aplicaciones elevadas, UWP/WinUI o sesiones remotas pueden rechazar o aplicar el
 cambio de forma diferida; el error se registra y la configuración avanzada se
 mantiene en Windows.
 
-Para validar o publicar el MVP 0.7:
+Para validar o publicar TenchyShell 0.8.9:
 
 ```powershell
 dotnet test TenchyShell.slnx

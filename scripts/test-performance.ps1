@@ -275,12 +275,16 @@ try {
     Assert-Throws { & $summarizer -InputPath $manualStressPath } "acciones de estrés automatizadas"
 
     $smokePlan = @(& $orchestrator -SmokeTest -PlanOnly)
-    if ($smokePlan.Count -ne 3 -or $smokePlan[0].Phase -ne "Idle" -or $smokePlan[2].Phase -ne "TenchyShellStress") {
-        throw "El plan automatizado de smoke tests no contiene las tres fases en el orden esperado."
+    if ($smokePlan.Count -ne 1 -or $smokePlan[0].Scenario -ne "TenchyShell" -or $smokePlan[0].Phase -ne "Idle") {
+        throw "El plan automatizado de smoke tests debe contener únicamente TenchyShell/Idle."
+    }
+    $orchestratorText = Get-Content -Raw -LiteralPath $orchestrator
+    if ($orchestratorText -match "Stop-SmokeOwnedProcesses" -or $orchestratorText -notmatch "cleanupCompleted") {
+        throw "El orquestador debe conservar el diagnóstico de limpieza y no forzar el workload desde SmokeTest."
     }
     $officialPlan = @(& $orchestrator -BatchId ("synthetic-" + [Guid]::NewGuid().ToString("N")) -PlanOnly)
-    if ($officialPlan.Count -ne 1 -or $officialPlan[0].Scenario -ne "Explorer" -or $officialPlan[0].Phase -ne "Idle") {
-        throw "El plan oficial automatizado no comienza con Explorer/Idle."
+    if ($officialPlan.Count -ne 1 -or $officialPlan[0].Scenario -ne "TenchyShell" -or $officialPlan[0].Phase -ne "Idle") {
+        throw "El plan oficial automatizado no comienza con TenchyShell/Idle."
     }
     Assert-Throws { & $orchestrator -BatchId "invalid batch" -PlanOnly } "BatchId"
 

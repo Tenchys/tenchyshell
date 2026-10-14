@@ -2,11 +2,11 @@
 
 ## Propósito y alcance
 
-Este protocolo crea una línea base reproducible entre `explorer.exe` y
-`TenchyShell.exe`. No intenta demostrar superioridad global con una sola
-máquina. La carga comparable se limita a reposo y a un ciclo neutral de
-WezTerm/Yazi; el dock y los workspaces se miden aparte en
-`TenchyShellStress` y nunca se usan para calcular deltas contra Explorer.
+Este protocolo crea una línea base reproducible de `TenchyShell.exe` en el
+escenario `Idle`, con WezTerm/Yazi como workload diario. No intenta demostrar
+superioridad global con una sola máquina. `CommonWorkflow` y
+`TenchyShellStress` permanecen disponibles para diagnósticos directos, pero ya
+no forman parte del orquestador automático.
 
 Los datos crudos contienen usuario, máquina, procesos y hardware. Se guardan
 fuera del repositorio en:
@@ -30,10 +30,9 @@ Antes de comenzar:
 
 1. Trabajar desde un commit limpio y publicar una única compilación Release.
 2. Ejecutar `dotnet test TenchyShell.slnx`, comprobar la publicación con
-   `--check`, ejecutar las pruebas sintéticas y superar los tres smoke tests
-   v3 antes de capturar el Día 0.
-3. Elegir un identificador de lote, por ejemplo `20260820-release-a`, y
-   conservarlo para las cinco capturas.
+   `--check`, ejecutar las pruebas sintéticas y superar el smoke test de
+   `TenchyShell / Idle` antes de capturar el Día 0.
+3. Elegir un identificador de captura, por ejemplo `20260906-idle-a`.
 4. Cerrar navegador, sincronizadores y aplicaciones voluntarias; mantener
    activos los mecanismos de seguridad.
 5. Cerrar sesión y volver a entrar antes de cada captura. Preparar el escenario
@@ -108,8 +107,9 @@ El informe calcula primero la mediana de cada repetición y después:
 
 ## Fases
 
-Los valores oficiales son cinco repeticiones, treinta muestras de un segundo,
-diez segundos de calentamiento y quince segundos de reposo entre repeticiones.
+Los valores oficiales de `Idle` son cinco repeticiones, treinta muestras de un
+segundo, diez segundos de calentamiento y quince segundos de reposo entre
+repeticiones.
 
 ### Idle
 
@@ -123,7 +123,10 @@ wezterm-gui.exe start --always-new-process -- yazi.exe
 El recolector rechaza `Idle` si no encuentra ambos procesos. Al terminar, el
 orquestador enfoca exclusivamente su ventana, solicita `q` a Yazi y comprueba
 el cierre normal; nunca termina procesos ajenos ni fuerza el cierre de la
-herramienta.
+herramienta. La captura se conserva antes de la limpieza. Si WezTerm/Yazi no
+terminan cooperativamente, el JSON queda como diagnóstico no oficial con
+`cleanupCompleted=false`, se detallan los PIDs restantes y el operador debe
+cerrar manualmente el workload antes de repetir una captura oficial.
 
 ### CommonWorkflow
 
@@ -168,15 +171,16 @@ Publicar y comprobar una única vez:
 La publicación incluye `benchmark-release.json`. El orquestador rechaza un
 árbol sucio, un manifiesto de otra publicación o un commit distinto.
 
-Primero, en una sesión del usuario secundario, ejecutar los tres smoke tests:
+Primero, en una sesión del usuario secundario, ejecutar el smoke test de Idle:
 
 ```powershell
 .\scripts\invoke-performance-benchmark.ps1 -SmokeTest
 ```
 
-No se pulsa ninguna tecla ni se prepara manualmente WezTerm/Yazi durante los
-smoke tests. Si una fase falla, se detiene la suite, se conserva la captura como
-inválida cuando existe y se restaura Explorer.
+No se pulsa ninguna tecla ni se prepara manualmente WezTerm/Yazi durante el
+smoke test. Si las muestras se guardan pero la limpieza falla, se conserva la
+captura como diagnóstico no oficial y se detiene la ejecución; no se fuerza
+ningún proceso ni se restaura Explorer automáticamente.
 
 Para la sesión oficial, cerrar y volver a iniciar sesión antes de cada captura.
 Ejecutar siempre el mismo comando; el orquestador inspecciona el lote y elige
@@ -186,25 +190,22 @@ la siguiente combinación en el orden equilibrado definido por el protocolo:
 .\scripts\invoke-performance-benchmark.ps1 -BatchId "20260820-release-a"
 ```
 
-El orden automático es Explorer/Idle, TenchyShell/Idle,
-TenchyShell/CommonWorkflow, Explorer/CommonWorkflow y
-TenchyShell/TenchyShellStress. Cada ejecución espera cinco minutos, realiza
-cinco repeticiones, cierra solo los procesos propios y restaura Explorer. Al
-final informa cuál será la captura siguiente. Tras la quinta ejecución genera
-`summary.md` automáticamente.
+El benchmark diagnóstico ejecuta únicamente TenchyShell/Idle. Cada ejecución
+usa una carpeta propia y no restaura Explorer. El análisis externo conserva las
+muestras de procesos y produce deltas y posibles sospechosos por PID.
 
 El modo interno `--automated-benchmark` solo es válido junto con
-`--without-explorer` y `--exit-after-seconds`; TenchyShell restaura Explorer en
-su bloque `finally`. Este modo suprime por completo `LiveBenchmarkRecorder`,
-aunque `[benchmark] enabled = true`, y el orquestador comprueba que no se cree
-ni amplíe ningún `live-*.jsonl`. Las sesiones normales conservan intacto el
-comportamiento opt-in de `[benchmark]`. El orquestador también mantiene una recuperación externa
-y marca la captura inválida si necesita forzar el cierre de su propio proceso.
+`--without-explorer` y `--exit-after-seconds`; TenchyShell conserva el
+`LiveBenchmarkRecorder` durante la captura. El orquestador crea una carpeta
+exclusiva por ejecución, copia el log persistente, captura stdout/stderr y
+filtra la telemetría por `sessionId`. No restaura Explorer: si TenchyShell no
+termina, registra el timeout y deja la recuperación posterior al procedimiento
+manual de la VM o usuario secundario.
 TenchyShell identifica `Shell_TrayWnd`, comprueba su PID propietario y solicita la misma salida cooperativa que ofrece la
 barra de tareas. No termina Explorer a la fuerza: exige que la superficie de
-shell permanezca ausente durante dos segundos. `explorer.exe` puede permanecer
-como proceso residual sin bandeja; la captura se cancela si Windows vuelve a
-crear `Shell_TrayWnd`, si el HWND no coincide o si el mensaje deja de ser
+shell y todos los procesos `explorer.exe` permanezcan ausentes durante dos
+segundos. Un proceso residual no permite iniciar la sesión; la captura se
+cancela si Windows vuelve a crear `Shell_TrayWnd`, si el HWND no coincide o si el mensaje deja de ser
 compatible con una versión futura. Este
 mensaje de la shell no es un contrato público de Win32, por lo que dicha
 validación y la recuperación posterior son requisitos del instrumental. El log
@@ -226,9 +227,10 @@ $batchPath = Join-Path $env:LOCALAPPDATA "TenchyShell\benchmarks\v3\$benchmarkBa
   -OutputPath (Join-Path $batchPath "summary.md")
 ```
 
-El resumidor exige las cinco combinaciones, una captura por combinación, cinco
-repeticiones válidas, árbol limpio, misma publicación/commit, entorno, ajustes,
-lote y orquestación automática completada.
+El resumidor v3 histórico continúa exigiendo las cinco combinaciones; las
+capturas diagnósticas nuevas se revisan mediante `run-status.json` y
+`resource-analysis.json` en su carpeta `runId` y no se mezclan con esa línea
+base comparativa.
 
 ## Pruebas del instrumental
 
@@ -242,9 +244,8 @@ incompleta, menos de cinco repeticiones y entornos mezclados:
 ```
 
 `-SmokeTest` en el orquestador ejecuta automáticamente una repetición corta de
-cada fase. El resumidor la rechaza salvo que se solicite explícitamente
-`-AllowSmokeTest`. Para diagnósticos de bajo nivel, el recolector conserva sus
-parámetros individuales:
+Idle. Para diagnósticos de bajo nivel, el recolector conserva sus parámetros
+individuales y permite ejecutar directamente las fases adicionales:
 
 ```powershell
 # Diagnóstico directo; el flujo normal usa invoke-performance-benchmark.ps1.
@@ -273,7 +274,7 @@ solo para investigar el recolector. No forma parte del procedimiento oficial.
 Esta primera comparativa establece una línea base, no un presupuesto ni la
 obligación de superar a Explorer en todas las métricas. Se acepta cuando:
 
-- las cinco capturas superan todas las validaciones automáticas;
+- las cinco repeticiones de Idle superan todas las validaciones automáticas;
 - ningún agregado contiene el observador ni la telemetría interna, y el informe
   muestra `Core`, `ShellSession` y la sección separada del observador;
 - no se requirió ninguna interacción durante cada captura;

@@ -62,6 +62,9 @@ public interface ILocalApiStateProvider
     LocalApiResult SwitchWorkspace(int workspace);
     LocalApiResult MoveActiveWindow(int workspace);
     event EventHandler<LocalApiStateChangedEventArgs>? StateChanged;
+
+    /// <summary>Informa qué tópicos tienen consumidores activos para evitar trabajo innecesario.</summary>
+    void SetTopicInterest(string topic, bool interested) { }
 }
 
 public sealed record LocalApiResult(bool Succeeded, string? ErrorCode = null, string? ErrorMessage = null)
@@ -72,12 +75,10 @@ public sealed record LocalApiResult(bool Succeeded, string? ErrorCode = null, st
 
 public sealed class LocalApiStateChangedEventArgs : EventArgs
 {
-    public LocalApiStateChangedEventArgs(string topic, LocalApiSnapshot snapshot)
+    public LocalApiStateChangedEventArgs(string topic)
     {
         Topic = topic;
-        Snapshot = snapshot;
     }
 
     public string Topic { get; }
-    public LocalApiSnapshot Snapshot { get; }
 }

@@ -272,6 +272,33 @@ public sealed class PlaceholderTests
     }
 
     [Fact]
+    public void WorkspaceManagerPurgesClosedWindowsWithoutRemovingHiddenLiveWindows()
+    {
+        var windowService = new FakeWorkspaceWindowService
+        {
+            VisibleWindows = new[] { (IntPtr)101 },
+            ExistingWindows = new HashSet<IntPtr> { (IntPtr)101 }
+        };
+        var manager = new WorkspaceManager(windowService);
+
+        manager.Refresh();
+        Assert.True(manager.SwitchTo(2).Succeeded);
+
+        windowService.VisibleWindows = new[] { (IntPtr)202 };
+        windowService.ExistingWindows.Add((IntPtr)202);
+        manager.Refresh();
+        Assert.Contains((IntPtr)101, manager.GetAllWorkspaceWindows()[1]);
+        Assert.Contains((IntPtr)202, manager.GetAllWorkspaceWindows()[2]);
+
+        windowService.ExistingWindows.Remove((IntPtr)101);
+        windowService.VisibleWindows = Array.Empty<IntPtr>();
+        manager.Refresh();
+
+        Assert.DoesNotContain((IntPtr)101, manager.GetAllWorkspaceWindows().SelectMany(pair => pair.Value));
+        Assert.Contains((IntPtr)202, manager.GetAllWorkspaceWindows()[2]);
+    }
+
+    [Fact]
     public void WindowServiceMovesActiveWindowAndKeepsItInsideWorkArea()
     {
         var nativeApi = new FakeWindowNativeApi
@@ -363,6 +390,8 @@ public sealed class PlaceholderTests
     {
         public IReadOnlyList<IntPtr> VisibleWindows { get; set; } = Array.Empty<IntPtr>();
 
+        public HashSet<IntPtr>? ExistingWindows { get; set; }
+
         public IntPtr ForegroundWindow { get; set; }
 
         public List<IntPtr> HiddenWindows { get; } = new();
@@ -374,6 +403,8 @@ public sealed class PlaceholderTests
         public IReadOnlyList<IntPtr> GetVisibleTopLevelWindows() => VisibleWindows;
 
         public string GetWindowTitle(IntPtr windowHandle) => $"Window {windowHandle}";
+
+        public bool WindowExists(IntPtr windowHandle) => ExistingWindows?.Contains(windowHandle) ?? windowHandle != IntPtr.Zero;
 
         public IntPtr GetForegroundWindow() => ForegroundWindow;
 

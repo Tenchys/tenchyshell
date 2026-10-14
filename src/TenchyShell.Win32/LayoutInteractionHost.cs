@@ -1,5 +1,7 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.Layout;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.Windows;
@@ -18,7 +20,9 @@ public sealed class LayoutInteractionHost : IDisposable
     private readonly LayoutZoneCatalog zoneCatalog;
     private readonly ILogger logger;
     private readonly DesktopAreaPolicy desktopAreaPolicy;
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
     private readonly LayoutDragStateMachine dragState = new();
+    private readonly LayoutHookInputState inputState = new();
     private readonly LayoutOverlayWindow overlay;
     private readonly NativeMethods.LowLevelHookProc mouseHookProcedure;
     private readonly NativeMethods.LowLevelHookProc keyboardHookProcedure;
@@ -30,8 +34,7 @@ public sealed class LayoutInteractionHost : IDisposable
     private IReadOnlyList<LayoutZone> currentZones = Array.Empty<LayoutZone>();
     private string currentMonitorId = string.Empty;
     private bool currentMonitorIsPrimary;
-    private bool controlPressed;
-    private bool shiftPressed;
+    private LayoutHookMetrics? hookMetrics;
     private bool isStarted;
     private bool isDisposed;
 
@@ -41,13 +44,15 @@ public sealed class LayoutInteractionHost : IDisposable
         LayoutZoneCatalog zoneCatalog,
         double zoneNumberSizePercent,
         ILogger logger,
-        DesktopAreaPolicy? desktopAreaPolicy = null)
+        DesktopAreaPolicy? desktopAreaPolicy = null,
+        LiveBenchmarkRecorder? benchmarkRecorder = null)
     {
         this.messageLoop = messageLoop;
         this.windowService = windowService;
         this.zoneCatalog = zoneCatalog;
         this.logger = logger;
         this.desktopAreaPolicy = desktopAreaPolicy ?? new DesktopAreaPolicy();
+        this.benchmarkRecorder = benchmarkRecorder;
         overlay = new LayoutOverlayWindow(logger, zoneNumberSizePercent);
         mouseHookProcedure = OnMouseHook;
         keyboardHookProcedure = OnKeyboardHook;
@@ -106,6 +111,10 @@ public sealed class LayoutInteractionHost : IDisposable
         dragState.Cancel();
         messageLoop.Post(overlay.Hide);
         ReleaseHooks();
+        if (benchmarkRecorder?.IsEnabled == true && hookMetrics is not null)
+        {
+            benchmarkRecorder.RecordLayoutHookMetrics(hookMetrics.Snapshot());
+        }
         overlay.Dispose();
         isDisposed = true;
         GC.SuppressFinalize(this);
@@ -113,6 +122,9 @@ public sealed class LayoutInteractionHost : IDisposable
 
     private IntPtr OnMouseHook(int code, IntPtr wParam, IntPtr lParam)
     {
+        var metrics = code >= 0 ? GetHookMetrics() : null;
+        var startedAt = metrics is null ? 0 : Stopwatch.GetTimestamp();
+        var wasDragging = dragState.IsDragging;
         if (code >= 0)
         {
             try
@@ -121,7 +133,7 @@ public sealed class LayoutInteractionHost : IDisposable
                 switch (unchecked((uint)wParam.ToInt64()))
                 {
                     case NativeMethods.WM_LBUTTONDOWN:
-                        if (controlPressed || shiftPressed ||
+                        if (inputState.ControlPressed || inputState.ShiftPressed ||
                             IsModifierPressed(NativeMethods.VK_CONTROL) ||
                             IsModifierPressed(NativeMethods.VK_SHIFT))
                         {
@@ -140,8 +152,16 @@ public sealed class LayoutInteractionHost : IDisposable
             }
             catch (Exception exception)
             {
+                metrics?.RecordError();
                 logger.Error("Error procesando el hook de mouse del layout.", exception);
                 CancelDrag();
+            }
+            finally
+            {
+                metrics?.RecordCallback(
+                    LayoutHookType.Mouse,
+                    wasDragging || dragState.IsDragging,
+                    Stopwatch.GetElapsedTime(startedAt));
             }
         }
 
@@ -150,6 +170,9 @@ public sealed class LayoutInteractionHost : IDisposable
 
     private IntPtr OnKeyboardHook(int code, IntPtr wParam, IntPtr lParam)
     {
+        var metrics = code >= 0 ? GetHookMetrics() : null;
+        var startedAt = metrics is null ? 0 : Stopwatch.GetTimestamp();
+        var wasDragging = dragState.IsDragging;
         if (code >= 0)
         {
             try
@@ -159,40 +182,29 @@ public sealed class LayoutInteractionHost : IDisposable
                 var isKeyDown = message is NativeMethods.WM_KEYDOWN or NativeMethods.WM_SYSKEYDOWN;
                 var isKeyUp = message is NativeMethods.WM_KEYUP or NativeMethods.WM_SYSKEYUP;
 
-                if (data.VirtualKeyCode is NativeMethods.VK_CONTROL or
-                    NativeMethods.VK_LCONTROL or
-                    NativeMethods.VK_RCONTROL)
-                {
-                    controlPressed = isKeyDown || (!isKeyUp && controlPressed);
-                }
-                else if (data.VirtualKeyCode is NativeMethods.VK_SHIFT or
-                         NativeMethods.VK_LSHIFT or
-                         NativeMethods.VK_RSHIFT)
-                {
-                    shiftPressed = isKeyDown || (!isKeyUp && shiftPressed);
-                }
+                inputState.ApplyModifier(data.VirtualKeyCode, isKeyDown, isKeyUp);
 
-                if (isKeyDown &&
-                    data.VirtualKeyCode == NativeMethods.VK_ESCAPE && dragState.IsDragging)
+                if (inputState.ShouldCancelForEscape(data.VirtualKeyCode, isKeyDown, dragState.IsDragging))
                 {
                     CancelDrag();
                 }
-                else if (isKeyUp &&
-                         data.VirtualKeyCode is NativeMethods.VK_CONTROL or
-                         NativeMethods.VK_LCONTROL or
-                         NativeMethods.VK_RCONTROL or
-                         NativeMethods.VK_SHIFT or
-                         NativeMethods.VK_LSHIFT or
-                         NativeMethods.VK_RSHIFT &&
-                         dragState.IsDragging)
+                else if (inputState.ShouldCancelForModifierRelease(data.VirtualKeyCode, isKeyUp, dragState.IsDragging))
                 {
                     CancelDrag();
                 }
             }
             catch (Exception exception)
             {
+                metrics?.RecordError();
                 logger.Error("Error procesando el hook de teclado del layout.", exception);
                 CancelDrag();
+            }
+            finally
+            {
+                metrics?.RecordCallback(
+                    LayoutHookType.Keyboard,
+                    wasDragging || dragState.IsDragging,
+                    Stopwatch.GetElapsedTime(startedAt));
             }
         }
 
@@ -291,6 +303,7 @@ public sealed class LayoutInteractionHost : IDisposable
         }
 
         dragState.Cancel();
+        hookMetrics?.RecordCancellation();
         PostOverlayHide();
     }
 
@@ -299,7 +312,7 @@ public sealed class LayoutInteractionHost : IDisposable
         var workArea = currentWorkArea;
         var zones = currentZones.ToArray();
         var selectedZone = dragState.HoveredZone;
-        messageLoop.Post(() =>
+        if (messageLoop.TryPost(() =>
         {
             if (dragState.IsDragging)
             {
@@ -309,7 +322,10 @@ public sealed class LayoutInteractionHost : IDisposable
             {
                 overlay.Hide();
             }
-        });
+        }))
+        {
+            hookMetrics?.RecordOverlayUpdate();
+        }
     }
 
     private void PostOverlayHide() => messageLoop.Post(overlay.Hide);
@@ -335,13 +351,13 @@ public sealed class LayoutInteractionHost : IDisposable
         (NativeMethods.GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 
     private bool IsControlPressed() =>
-        controlPressed ||
+        inputState.ControlPressed ||
         IsModifierPressed(NativeMethods.VK_CONTROL) ||
         IsModifierPressed(NativeMethods.VK_LCONTROL) ||
         IsModifierPressed(NativeMethods.VK_RCONTROL);
 
     private bool IsShiftPressed() =>
-        shiftPressed ||
+        inputState.ShiftPressed ||
         IsModifierPressed(NativeMethods.VK_SHIFT) ||
         IsModifierPressed(NativeMethods.VK_LSHIFT) ||
         IsModifierPressed(NativeMethods.VK_RSHIFT);
@@ -403,5 +419,15 @@ public sealed class LayoutInteractionHost : IDisposable
         }
 
         isStarted = false;
+    }
+
+    private LayoutHookMetrics? GetHookMetrics()
+    {
+        if (benchmarkRecorder?.IsEnabled != true)
+        {
+            return null;
+        }
+
+        return hookMetrics ??= new LayoutHookMetrics();
     }
 }

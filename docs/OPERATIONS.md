@@ -19,6 +19,12 @@ modifica Winlogon ni debe ejecutarse en la sesión principal.
 dotnet run --project src/TenchyShell.App/TenchyShell.App.csproj -- --without-explorer .\config\TenchyShell.without-explorer.example.toml
 ```
 
+El arranque solo continúa cuando `Shell_TrayWnd` y todos los procesos
+`explorer.exe` de la sesión han desaparecido y esa condición se mantiene
+durante 2 segundos. TenchyShell realiza un intento inicial y hasta tres
+reintentos, separados por 2 segundos; si Explorer no termina, aborta el
+arranque con un error observable y nunca termina el proceso a la fuerza.
+
 Si falla una prueba, usa el hotkey de recuperación o ejecuta `explorer.exe`
 desde una terminal. Conserva una terminal funcional antes de detener Explorer.
 

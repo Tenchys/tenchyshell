@@ -18,6 +18,9 @@ public sealed class MessageLoopHost : IDisposable
     private int messageLoopManagedThreadId;
     private bool isRunning;
     private bool isDisposed;
+    private bool acceptsConfiguration;
+    private int pendingActionCount;
+    private int maximumPendingActionCount;
 
     public MessageLoopHost()
     {
@@ -36,6 +39,12 @@ public sealed class MessageLoopHost : IDisposable
     /// <summary>Indica si el código se está ejecutando en el hilo que posee la cola Win32.</summary>
     public bool IsOnMessageLoopThread => isRunning && messageLoopManagedThreadId == Environment.CurrentManagedThreadId;
 
+    /// <summary>Trabajo pendiente observado sin sondeo; útil para telemetría opt-in.</summary>
+    public int PendingActionCount => Volatile.Read(ref pendingActionCount);
+
+    /// <summary>Máxima profundidad observada desde la creación del host.</summary>
+    public int MaximumPendingActionCount => Volatile.Read(ref maximumPendingActionCount);
+
     /// <summary>Encola trabajo en el hilo que posee la cola Win32.</summary>
     public void Post(Action action) => TryPost(action);
 
@@ -49,9 +58,12 @@ public sealed class MessageLoopHost : IDisposable
             if (isDisposed || windowHandle == IntPtr.Zero) return false;
 
             var entry = postedActions.AddLast(action);
+            var count = ++pendingActionCount;
+            UpdateMaximumPendingActions(count);
             if (NativeMethods.PostMessage(windowHandle, NativeMethods.WM_APP_EXECUTE, IntPtr.Zero, IntPtr.Zero)) return true;
 
             postedActions.Remove(entry);
+            --pendingActionCount;
             return false;
         }
     }
@@ -60,7 +72,7 @@ public sealed class MessageLoopHost : IDisposable
     {
         ObjectDisposedException.ThrowIf(isDisposed, this);
 
-        if (isRunning)
+        if (isRunning && !acceptsConfiguration)
         {
             throw new InvalidOperationException("No se pueden configurar hotkeys mientras el message loop está ejecutándose.");
         }
@@ -82,7 +94,9 @@ public sealed class MessageLoopHost : IDisposable
         }
     }
 
-    public int Run(Action? onInitialized = null)
+    public int Run(
+        Action? onInitialized = null,
+        Action? onHotkeysReady = null)
     {
         ObjectDisposedException.ThrowIf(isDisposed, this);
 
@@ -94,11 +108,15 @@ public sealed class MessageLoopHost : IDisposable
         CreateMessageWindow();
         isRunning = true;
         messageLoopManagedThreadId = Environment.CurrentManagedThreadId;
+        acceptsConfiguration = true;
 
         try
         {
             onInitialized?.Invoke();
+            acceptsConfiguration = false;
+            RegisterConfiguredHotkeys(requiredOnly: true);
             RegisterConfiguredHotkeys(requiredOnly: false);
+            onHotkeysReady?.Invoke();
 
             while (true)
             {
@@ -120,6 +138,7 @@ public sealed class MessageLoopHost : IDisposable
         }
         finally
         {
+            acceptsConfiguration = false;
             isRunning = false;
             messageLoopManagedThreadId = 0;
             ReleaseNativeResources();
@@ -189,7 +208,6 @@ public sealed class MessageLoopHost : IDisposable
             throw new Win32Exception(Marshal.GetLastWin32Error(), "No se pudo crear la ventana de mensajes del shell.");
         }
 
-        RegisterConfiguredHotkeys(requiredOnly: true);
     }
 
     private void RegisterConfiguredHotkeys(bool requiredOnly)
@@ -277,7 +295,11 @@ public sealed class MessageLoopHost : IDisposable
 
     private void ReleaseNativeResources()
     {
-        lock (postedActionsGate) postedActions.Clear();
+        lock (postedActionsGate)
+        {
+            postedActions.Clear();
+            Volatile.Write(ref pendingActionCount, 0);
+        }
 
         if (windowHandle != IntPtr.Zero)
         {
@@ -310,7 +332,17 @@ public sealed class MessageLoopHost : IDisposable
 
             action = postedActions.First.Value;
             postedActions.RemoveFirst();
+            --pendingActionCount;
             return true;
+        }
+    }
+
+    private void UpdateMaximumPendingActions(int count)
+    {
+        while (true)
+        {
+            var previous = Volatile.Read(ref maximumPendingActionCount);
+            if (count <= previous || Interlocked.CompareExchange(ref maximumPendingActionCount, count, previous) == previous) return;
         }
     }
 }

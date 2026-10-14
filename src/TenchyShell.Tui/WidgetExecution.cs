@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Text;
 using TenchyShell.Core.Configuration;
+using TenchyShell.Core.Diagnostics;
+using TenchyShell.Win32;
 
 namespace TenchyShell.Tui;
 
@@ -9,10 +11,11 @@ public sealed record WidgetExecutionResult(
     string Output,
     string? Error = null,
     bool TimedOut = false,
-    bool Truncated = false)
+    bool Truncated = false,
+    ProcessResourceSnapshot? Resources = null)
 {
-    public static WidgetExecutionResult Success(string output, bool truncated = false) =>
-        new(true, output, null, false, truncated);
+    public static WidgetExecutionResult Success(string output, bool truncated = false, ProcessResourceSnapshot? resources = null) =>
+        new(true, output, null, false, truncated, resources);
 
     public static WidgetExecutionResult Failure(string error, bool timedOut = false) =>
         new(false, string.Empty, error, timedOut, false);
@@ -97,7 +100,7 @@ public sealed class ExternalWidgetCommandRunner : IWidgetCommandRunner
             return WidgetExecutionResult.Failure(error);
         }
 
-        return WidgetExecutionResult.Success(limited.Output, limited.Truncated);
+        return WidgetExecutionResult.Success(limited.Output, limited.Truncated, ProcessResourceSampler.Capture(process));
     }
 
     private static async Task<string> ReadLimitedAsync(

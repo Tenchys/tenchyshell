@@ -15,6 +15,26 @@ La TUI también puede ejecutarse directamente con `TenchyShell.exe --tui
 <ruta.toml>`; no crea ventanas Win32 ni registra hotkeys. `--without-tui`
 mantiene el shell sin abrir esa pestaña durante diagnóstico o recuperación.
 
+## Splash de inicio
+
+El arranque interactivo normal muestra un splash Win32/GDI temporal que informa
+las fases reales de preparación. Usa el mismo message loop de TenchyShell, no
+inicia Explorer y se cierra y libera antes de que comience la sesión normal.
+No se muestra en `--check`, `--launch`, `--session`, `--tui`,
+`--diagnose-packaged` ni `--automated-benchmark`.
+
+Para una captura manual, `--keep-splash` conserva la superficie visible cuando
+la sesión ya está preparada. Haz clic sobre ella para cerrarla sin detener el
+shell:
+
+```powershell
+TenchyShell.exe --keep-splash --without-tui .\config\TenchyShell.example.toml
+```
+
+Si no puede crearse el splash o falla una fase obligatoria, TenchyShell cierra
+la superficie, informa el error en consola y logs, y termina con un código de
+error.
+
 ## Diagnóstico comparativo de activación MSIX/UWP
 
 `--diagnose-packaged` ejecuta la activación oficial por `AppUserModelId` dentro
@@ -33,7 +53,8 @@ marcas temporales de cada intento. Los logs permanentes solo registran el
 contexto, el estado de Explorer, el resultado y el HRESULT. Obtén los AUMID
 reales con `Get-StartApps` antes de probar. Para la variante sin Explorer usa
 solo una VM o usuario secundario y `--automated-benchmark --without-explorer`;
-el mecanismo de benchmark restaura Explorer al finalizar.
+el mecanismo de benchmark no restaura Explorer al finalizar; la recuperación
+posterior es manual.
 
 ### Comparación ETW controlada
 
@@ -125,6 +146,7 @@ separados.
 | `[layout]` y `[[layout.zones]]` | preset, zonas, monitor | Layout de ventanas y overlay. |
 | `[hotkeys]` y subtablas | combinaciones globales | Acciones del shell, workspaces, ventanas y layout. |
 | `[benchmark]` | perfil, intervalo, retención, cuota | Registro de sesión real. |
+| `[logging]` | `console` | Duplica el log persistente en stdout/stderr. |
 | `[notifications]` | `enabled` | Bridge MSIX opcional por usuario. |
 | `[tui]`, `[[tui.widgets]]` | habilitación, título, tipo y fuente | Interfaz de consola y widgets aislados. |
 

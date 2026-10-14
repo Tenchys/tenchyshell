@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using TenchyShell.Core.Configuration;
 using TenchyShell.Core.Logging;
@@ -11,31 +12,37 @@ namespace TenchyShell.Core.Diagnostics;
 /// </summary>
 public sealed class LiveBenchmarkRecorder : IDisposable
 {
+    private static readonly ConcurrentDictionary<string, object> fileWriteLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly BenchmarkConfiguration configuration;
     private readonly ILogger logger;
     private readonly string directory;
     private readonly bool suppressed;
     private readonly object syncRoot = new();
-    private readonly string sessionId = Guid.NewGuid().ToString("N");
+    private readonly string sessionId;
     private readonly Dictionary<string, DateTimeOffset> lastSampledEventAt = new(StringComparer.Ordinal);
     private Timer? timer;
     private bool disposed;
+    private bool sessionEnded;
 
     public LiveBenchmarkRecorder(
         BenchmarkConfiguration configuration,
         ILogger logger,
         string? rootDirectory = null,
-        bool suppressed = false)
+        bool suppressed = false,
+        string? sessionId = null)
     {
         this.configuration = configuration;
         this.logger = logger;
         this.suppressed = suppressed;
+        this.sessionId = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString("N") : sessionId;
         directory = rootDirectory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TenchyShell", "benchmarks", "live");
     }
 
     public string DirectoryPath => directory;
+
+    public string SessionId => sessionId;
 
     public bool IsEnabled => configuration.Enabled && !suppressed && !disposed;
 
@@ -47,7 +54,8 @@ public sealed class LiveBenchmarkRecorder : IDisposable
             Directory.CreateDirectory(directory);
             Prune();
             Record("session_started", new { profile = configuration.CaptureProfile });
-            timer = new Timer(_ => CaptureSample(), null, TimeSpan.Zero, TimeSpan.FromSeconds(configuration.SampleIntervalSeconds));
+            var interval = TimeSpan.FromSeconds(configuration.SampleIntervalSeconds);
+            timer = new Timer(_ => CaptureSample(), null, interval, interval);
         }
         catch (Exception exception)
         {
@@ -100,6 +108,190 @@ public sealed class LiveBenchmarkRecorder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Publica solo contadores y recursos agregados de un ejecutor periódico.
+    /// Los comandos, argumentos y salida nunca forman parte de este registro.
+    /// </summary>
+    public void RecordPeriodicExecutionMetrics(PeriodicExecutionMetrics metrics)
+    {
+        ArgumentNullException.ThrowIfNull(metrics);
+        if (string.IsNullOrWhiteSpace(metrics.Executor))
+        {
+            throw new ArgumentException("El ejecutor de métricas es obligatorio.", nameof(metrics));
+        }
+
+        Record("periodic_execution_metrics", new
+        {
+            executor = metrics.Executor,
+            processesStarted = Math.Max(0, metrics.ProcessesStarted),
+            overlapsAvoided = Math.Max(0, metrics.OverlapsAvoided),
+            cancellations = Math.Max(0, metrics.Cancellations),
+            timeouts = Math.Max(0, metrics.Timeouts),
+            errors = Math.Max(0, metrics.Errors),
+            cpuMilliseconds = NonNegative(metrics.CpuMilliseconds),
+            readBytes = NonNegative(metrics.ReadBytes),
+            writtenBytes = NonNegative(metrics.WrittenBytes),
+            peakWorkingSetBytes = NonNegative(metrics.PeakWorkingSetBytes),
+            lastValidOutputAgeMilliseconds = Math.Max(0, metrics.LastValidOutputAgeMilliseconds),
+            durationMilliseconds = Math.Max(0, metrics.DurationMilliseconds)
+        });
+    }
+
+    /// <summary>
+    /// Publica el agregado seguro del logger de archivos. La fuente debe
+    /// entregar únicamente contadores y duraciones; el recorder no acepta ni
+    /// serializa detalles libres para este evento.
+    /// </summary>
+    public void RecordFileLoggerMetrics(FileLoggerMetrics metrics)
+    {
+        ArgumentNullException.ThrowIfNull(metrics);
+
+        Record("file_logger_metrics", new
+        {
+            logCalls = NonNegative(metrics.LogCalls),
+            writeFailures = NonNegative(metrics.WriteFailures),
+            maintenanceCalls = NonNegative(metrics.MaintenanceCalls),
+            archiveScans = NonNegative(metrics.ArchiveScans),
+            archiveFilesSeen = NonNegative(metrics.ArchiveFilesSeen),
+            archiveFilesDeleted = NonNegative(metrics.ArchiveFilesDeleted),
+            rotationsByDay = NonNegative(metrics.RotationsByDay),
+            rotationsBySize = NonNegative(metrics.RotationsBySize),
+            contentionCount = NonNegative(metrics.ContentionCount),
+            contentionWaitMilliseconds = NonNegative(metrics.ContentionWaitMilliseconds),
+            writeDurationP95Milliseconds = NonNegative(metrics.WriteDurationP95Milliseconds),
+            maintenanceDurationP95Milliseconds = NonNegative(metrics.MaintenanceDurationP95Milliseconds),
+            bytesWritten = NonNegative(metrics.BytesWritten),
+            archiveCountAtEnd = NonNegative(metrics.ArchiveCountAtEnd)
+        });
+    }
+
+    /// <summary>
+    /// Publica sólo el agregado del coste de los hooks globales del layout.
+    /// Nunca incluye coordenadas, teclas, HWND ni títulos.
+    /// </summary>
+    public void RecordLayoutHookMetrics(LayoutHookMetricsSnapshot metrics)
+    {
+        Record("layout_hook_metrics", new
+        {
+            callbacks = NonNegative(metrics.Callbacks),
+            mouseCallbacks = NonNegative(metrics.MouseCallbacks),
+            keyboardCallbacks = NonNegative(metrics.KeyboardCallbacks),
+            callbacksDuringDrag = NonNegative(metrics.CallbacksDuringDrag),
+            overlayUpdatesPublished = NonNegative(metrics.OverlayUpdatesPublished),
+            cancellations = NonNegative(metrics.Cancellations),
+            errors = NonNegative(metrics.Errors),
+            totalDurationMilliseconds = NonNegative(metrics.TotalDurationMilliseconds),
+            maximumDurationMilliseconds = NonNegative(metrics.MaximumDurationMilliseconds)
+        });
+    }
+
+    /// <summary>
+    /// Publica sólo contadores agregados del renderizado de la bandeja y limita
+    /// el evento al intervalo de muestra configurado.
+    /// </summary>
+    public void RecordSystemTrayMetrics(SystemTrayMetricsSnapshot metrics)
+    {
+        RecordAtMostEverySampleInterval("system_tray_metrics", new
+        {
+            repaints = NonNegative(metrics.Repaints),
+            iconLoadsSucceeded = NonNegative(metrics.IconLoadsSucceeded),
+            iconLoadsFailed = NonNegative(metrics.IconLoadsFailed),
+            totalPaintDurationMilliseconds = NonNegative(metrics.TotalPaintDurationMilliseconds),
+            maximumPaintDurationMilliseconds = NonNegative(metrics.MaximumPaintDurationMilliseconds),
+            readBytes = NonNegative(metrics.ReadBytes),
+            writtenBytes = NonNegative(metrics.WrittenBytes),
+            gdiHandlesBefore = NonNegative(metrics.GdiHandlesBefore),
+            gdiHandlesAfter = NonNegative(metrics.GdiHandlesAfter)
+        });
+    }
+
+    /// <summary>Publica solo agregados de operaciones del historial de notificaciones.</summary>
+    public void RecordNotificationCenterMetrics(NotificationCenterMetricsSnapshot metrics)
+    {
+        Record("notification_center_metrics", new
+        {
+            addCount = NonNegative(metrics.AddCount),
+            addTotalMilliseconds = NonNegative(metrics.AddTotalMilliseconds),
+            addAllocatedBytes = NonNegative(metrics.AddAllocatedBytes),
+            addMaximumMilliseconds = NonNegative(metrics.AddMaximumMilliseconds),
+            addMaximumAllocatedBytes = NonNegative(metrics.AddMaximumAllocatedBytes),
+            addDurationP95Milliseconds = NonNegative(metrics.AddDurationP95Milliseconds),
+            getActiveCount = NonNegative(metrics.GetActiveCount),
+            getActiveTotalMilliseconds = NonNegative(metrics.GetActiveTotalMilliseconds),
+            getActiveAllocatedBytes = NonNegative(metrics.GetActiveAllocatedBytes),
+            getActiveMaximumMilliseconds = NonNegative(metrics.GetActiveMaximumMilliseconds),
+            getActiveMaximumAllocatedBytes = NonNegative(metrics.GetActiveMaximumAllocatedBytes),
+            getActiveDurationP95Milliseconds = NonNegative(metrics.GetActiveDurationP95Milliseconds),
+            removeCount = NonNegative(metrics.RemoveCount),
+            removeTotalMilliseconds = NonNegative(metrics.RemoveTotalMilliseconds),
+            removeAllocatedBytes = NonNegative(metrics.RemoveAllocatedBytes),
+            removeMaximumMilliseconds = NonNegative(metrics.RemoveMaximumMilliseconds),
+            removeMaximumAllocatedBytes = NonNegative(metrics.RemoveMaximumAllocatedBytes),
+            removeDurationP95Milliseconds = NonNegative(metrics.RemoveDurationP95Milliseconds),
+            trimCalls = NonNegative(metrics.TrimCalls),
+            trimmedItems = NonNegative(metrics.TrimmedItems)
+        });
+    }
+
+    /// <summary>Publica solo agregados del pintado de tarjetas y lectura de sus iconos.</summary>
+    public void RecordNotificationSurfaceMetrics(NotificationSurfaceMetricsSnapshot metrics)
+    {
+        Record("notification_surface_metrics", new
+        {
+            repaints = NonNegative(metrics.Repaints),
+            iconDecodeAttempts = NonNegative(metrics.IconDecodeAttempts),
+            totalIconDecodeDurationMilliseconds = NonNegative(metrics.TotalIconDecodeDurationMilliseconds),
+            maximumIconDecodeDurationMilliseconds = NonNegative(metrics.MaximumIconDecodeDurationMilliseconds),
+            totalPaintDurationMilliseconds = NonNegative(metrics.TotalPaintDurationMilliseconds),
+            maximumPaintDurationMilliseconds = NonNegative(metrics.MaximumPaintDurationMilliseconds),
+            p95PaintDurationMilliseconds = NonNegative(metrics.P95PaintDurationMilliseconds),
+            iconBytesPresentedToDecoder = NonNegative(metrics.IconBytesPresentedToDecoder),
+            iconBytesWritten = NonNegative(metrics.IconBytesWritten)
+        });
+    }
+
+    /// <summary>
+    /// Publica solo contadores y duraciones agregadas de una enumeraci?n de
+    /// red. No incluye SSID, nombres, rutas, HWND, t?tulos ni datos de sesi?n.
+    /// </summary>
+    public void RecordNetworkEnumerationMetrics(NetworkEnumerationMetricsSnapshot metrics)
+    {
+        Record("network_enumeration", new
+        {
+            ethernetInterfaces = NonNegative(metrics.EthernetInterfaces),
+            wifiInterfaces = NonNegative(metrics.WifiInterfaces),
+            vpnInterfaces = NonNegative(metrics.VpnInterfaces),
+            unknownInterfaces = NonNegative(metrics.UnknownInterfaces),
+            wifiNetworksBeforeDeduplication = NonNegative(metrics.WifiNetworksBeforeDeduplication),
+            uniqueWifiNetworks = NonNegative(metrics.UniqueWifiNetworks),
+            maximumNetworksPerSnapshot = NonNegative(metrics.MaximumNetworksPerSnapshot),
+            totalDurationMilliseconds = NonNegative(metrics.TotalDurationMilliseconds),
+            interfaceEnumerationDurationMilliseconds = NonNegative(metrics.InterfaceEnumerationDurationMilliseconds),
+            wifiEnumerationDurationMilliseconds = NonNegative(metrics.WifiEnumerationDurationMilliseconds),
+            hasError = metrics.HasError
+        });
+    }
+
+    public void EndSession(bool clean, string reason)
+    {
+        lock (syncRoot)
+        {
+            if (disposed || sessionEnded) return;
+            if (configuration.Enabled && !suppressed)
+            {
+                try
+                {
+                    WriteUnsafe(new { timestamp = DateTimeOffset.UtcNow, sessionId, type = "event", name = "session_stopped", details = new { clean, reason } });
+                }
+                catch (Exception exception)
+                {
+                    SafeLogError("No se pudo registrar el fin de sesión del benchmark.", exception);
+                }
+            }
+            sessionEnded = true;
+        }
+    }
+
     public void Dispose()
     {
         lock (syncRoot)
@@ -107,9 +299,17 @@ public sealed class LiveBenchmarkRecorder : IDisposable
             if (disposed) return;
             timer?.Dispose();
             timer = null;
-            if (configuration.Enabled && !suppressed)
+            if (!sessionEnded && configuration.Enabled && !suppressed)
             {
-                WriteUnsafe(new { timestamp = DateTimeOffset.UtcNow, sessionId, type = "event", name = "session_stopped", details = (object?)null });
+                try
+                {
+                    WriteUnsafe(new { timestamp = DateTimeOffset.UtcNow, sessionId, type = "event", name = "session_stopped", details = new { clean = true, reason = "disposed" } });
+                }
+                catch (Exception exception)
+                {
+                    SafeLogError("No se pudo registrar el cierre del benchmark.", exception);
+                }
+                sessionEnded = true;
             }
             disposed = true;
         }
@@ -157,7 +357,16 @@ public sealed class LiveBenchmarkRecorder : IDisposable
     {
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"live-{DateTime.UtcNow:yyyyMMdd}.jsonl");
-        File.AppendAllText(path, JsonSerializer.Serialize(record) + Environment.NewLine);
+        // Varias instancias opt-in (por ejemplo, TUI y el shell en pruebas)
+        // pueden coincidir en el archivo diario. El bloqueo propio protege una
+        // instancia; compartir lectura/escritura evita que una segunda sesión
+        // falle solo por abrir el mismo NDJSON.
+        lock (fileWriteLocks.GetOrAdd(path, static _ => new object()))
+        {
+            using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+            using var writer = new StreamWriter(stream);
+            writer.WriteLine(JsonSerializer.Serialize(record));
+        }
     }
 
     private void Prune()
@@ -190,4 +399,9 @@ public sealed class LiveBenchmarkRecorder : IDisposable
             // desaparece durante el apagado de una sesión.
         }
     }
+
+    private static double? NonNegative(double? value) => value is null ? null : Math.Max(0, value.Value);
+    private static long? NonNegative(long? value) => value is null ? null : Math.Max(0, value.Value);
+    private static long NonNegative(long value) => Math.Max(0, value);
+    private static double NonNegative(double value) => Math.Max(0, value);
 }

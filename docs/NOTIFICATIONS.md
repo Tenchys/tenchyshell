@@ -16,6 +16,18 @@ named pipe de la sesión del usuario. No hay polling.
   lo proporciona, TenchyShell lo muestra; WezTerm, por ejemplo, actualmente no
   entrega uno mediante esta API.
 
+El hito 0.8.19 quedó cerrado parcialmente por aceptación del usuario
+(2026-09-22): una prueba manual confirmó que el bridge recibió una notificación
+nueva de Auto HDR y TenchyShell la mostró. El hito añadió instrumentación
+agregada y opt-in para medir el historial (inserción, consulta y recorte) y las
+tarjetas (pintura y decodificación de iconos). Los detalles no registran
+identificadores ni contenido de notificaciones; el sobre JSONL conserva el
+`sessionId` opaco común del recorder para agrupar eventos. El tamaño de los
+bytes presentados al decodificador describe la entrada procesada; no equivale a
+bytes de I/O físico. El benchmark comparativo Release sigue pendiente: no se
+declara mejora ni se añade caché. También queda pendiente revalidar el
+historial/tarjetas y la ruta con notificaciones deshabilitadas.
+
 Los avisos nuevos aparecen hasta seis segundos abajo a la derecha. Durante la
 sesión, el historial está en `Ctrl+Alt+T` → `Notificaciones`. No se ejecutan
 acciones ni contenido de las aplicaciones desde TenchyShell.
@@ -54,7 +66,9 @@ acciones ni contenido de las aplicaciones desde TenchyShell.
    tarjeta y el historial de la bandeja.
 
 Para deshabilitar completamente la función, usa `enabled = false` y reinicia
-TenchyShell. No se inicia el bridge ni se conserva historial entre sesiones.
+TenchyShell. En esta ruta no se inicia el bridge, la superficie de notificación
+ni timers, no se conserva historial entre sesiones y no se emite telemetría de
+notificaciones.
 
 ## Verificación y diagnóstico
 
@@ -75,6 +89,21 @@ TenchyShellNotificationTestSender.exe
 El emisor de prueba no queda ejecutándose y usa un icono visible para comprobar
 el renderizado. Es una herramienta de desarrollo, no se distribuye con el
 producto.
+
+## Validación de rendimiento del hito 0.8.19
+
+La comparación pendiente requiere Windows 11 Release y cinco repeticiones del
+flujo real: emisor MSIX, bridge MSIX y named pipe, con condiciones iguales para
+baseline y variante. Cubrir cargas pequeñas y bursts hasta el límite del
+historial de 100 elementos, y observar inserción/consulta/recorte, asignaciones,
+pintura, decodificación, recursos y errores. Guardar los resultados fuera del
+repositorio. Actualmente falta el entorno controlado para ejecutar esta
+comparación; hasta tenerla no se afirma mejora ni se introduce caché.
+
+La comprobación manual incluye iconos disponibles, ausentes e inválidos,
+retiro desde tarjeta e historial, expiración, cierre de superficie con tarjeta
+visible y configuración `enabled = false`. En el modo deshabilitado se confirma
+que no hay bridge, superficie, timers, historial ni telemetría de notificaciones.
 
 Los registros son:
 

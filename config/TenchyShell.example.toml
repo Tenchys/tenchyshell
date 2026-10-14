@@ -68,6 +68,10 @@ sample_interval_seconds = 10
 retention_days = 14
 max_storage_mb = 256
 
+[logging]
+# Duplica el log persistente en stdout/stderr para capturas externas.
+console = false
+
 # Requiere instalar y autorizar el bridge MSIX opcional de notificaciones.
 [notifications]
 enabled = false

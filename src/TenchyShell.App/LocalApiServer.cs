@@ -1,36 +1,49 @@
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
+using TenchyShell.Core.Diagnostics;
 using TenchyShell.Core.LocalApi;
 using TenchyShell.Core.Logging;
 
 namespace TenchyShell.App;
 
+/// <summary>Servidor v1: materializa cada publicación una vez para sus suscriptores.</summary>
 internal sealed class LocalApiServer : IDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
-
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
     private readonly ILocalApiStateProvider state;
     private readonly ILogger logger;
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
+    private readonly Func<Stream, byte[], Task> writeClientMessage;
+    private readonly Func<Stream, Task> flushClientMessage;
     private readonly CancellationTokenSource cancellation = new();
     private readonly SemaphoreSlim connectionSlots = new(LocalApiDefaults.MaxConnections);
     private readonly object clientsGate = new();
+    // Ordena subscribe + snapshot inicial respecto de los eventos posteriores.
+    private readonly object publicationGate = new();
     private readonly HashSet<Client> clients = new();
     private readonly HashSet<Task> backgroundTasks = new();
     private Task? acceptTask;
     private bool disposed;
+    private long snapshotsBuilt;
+    private long publishedEvents;
+    private long publishedBytes;
+    private long slowClientDisconnects;
+    private int maximumQueueDepth;
+    private long nextClientId;
 
-    public LocalApiServer(ILocalApiStateProvider state, ILogger logger)
+    public LocalApiServer(ILocalApiStateProvider state, ILogger logger, LiveBenchmarkRecorder? benchmarkRecorder = null, Func<Stream, byte[], Task>? writeClientMessage = null, Func<Stream, Task>? flushClientMessage = null)
     {
         this.state = state;
         this.logger = logger;
+        this.benchmarkRecorder = benchmarkRecorder;
+        this.writeClientMessage = writeClientMessage ?? ((stream, bytes) => stream.WriteAsync(bytes).AsTask());
+        this.flushClientMessage = flushClientMessage ?? (stream => stream.FlushAsync());
         state.StateChanged += OnStateChanged;
     }
 
@@ -48,10 +61,7 @@ internal sealed class LocalApiServer : IDisposable
         state.StateChanged -= OnStateChanged;
         cancellation.Cancel();
         WaitForAcceptTask();
-        lock (clientsGate)
-        {
-            foreach (var client in clients.ToArray()) client.Dispose();
-        }
+        lock (clientsGate) foreach (var client in clients.ToArray()) client.Dispose();
         WaitForBackgroundTasks();
         connectionSlots.Dispose();
         cancellation.Dispose();
@@ -73,16 +83,12 @@ internal sealed class LocalApiServer : IDisposable
                     pipe.Dispose();
                     continue;
                 }
-
-                var client = new Client(pipe, state, logger, OnClientClosed);
+                var client = new Client(Interlocked.Increment(ref nextClientId), pipe, state, logger, writeClientMessage, flushClientMessage, OnClientClosed, Subscribe, OnQueueUpdated);
                 lock (clientsGate) clients.Add(client);
                 pipe = null;
                 Track(client.RunAsync(token), "Error no observado en una conexión de API local.");
             }
-            catch (OperationCanceledException) when (token.IsCancellationRequested)
-            {
-                pipe?.Dispose();
-            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { pipe?.Dispose(); }
             catch (Exception exception)
             {
                 pipe?.Dispose();
@@ -95,57 +101,71 @@ internal sealed class LocalApiServer : IDisposable
     private NamedPipeServerStream CreatePipe()
     {
         var security = new PipeSecurity();
-        var identity = WindowsIdentity.GetCurrent().User
-            ?? throw new InvalidOperationException("No se pudo obtener el SID del usuario actual.");
+        var identity = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("No se pudo obtener el SID del usuario actual.");
         security.AddAccessRule(new PipeAccessRule(identity, PipeAccessRights.FullControl, AccessControlType.Allow));
-        return NamedPipeServerStreamAcl.Create(
-            LocalApiDefaults.PipeName,
-            PipeDirection.InOut,
-            NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous,
-            0,
-            0,
-            security);
+        return NamedPipeServerStreamAcl.Create(LocalApiDefaults.PipeName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, security);
     }
 
-    private static async Task WriteRejectedConnectionAsync(Stream pipe, CancellationToken token)
-    {
-        var message = JsonSerializer.Serialize(
-            new LocalApiEnvelope(LocalApiDefaults.Version, "response", null, false, null,
-                new LocalApiError("connection_limit", "Se alcanzó el límite de conexiones.")), JsonOptions);
-        var bytes = Encoding.UTF8.GetBytes(message + "\n");
-        await pipe.WriteAsync(bytes, token).ConfigureAwait(false);
-    }
+    private static Task WriteRejectedConnectionAsync(Stream pipe, CancellationToken token) =>
+        pipe.WriteAsync(Serialize(new LocalApiEnvelope(LocalApiDefaults.Version, "response", null, false, null, new LocalApiError("connection_limit", "Se alcanzó el límite de conexiones."))), token).AsTask();
 
     private void OnStateChanged(object? sender, LocalApiStateChangedEventArgs args)
     {
-        Client[] active;
-        lock (clientsGate) active = clients.ToArray();
-        foreach (var client in active)
+        lock (publicationGate)
         {
-            Track(client.PublishAsync(args, cancellation.Token), "Error no observado al publicar un evento de API local.");
+            Client[] interested;
+            lock (clientsGate) interested = clients.Where(client => client.IsSubscribedTo(args.Topic)).ToArray();
+            if (interested.Length == 0) return;
+
+            // Nunca creamos snapshots en cambios sin un cliente interesado.
+            var startedAt = Stopwatch.GetTimestamp();
+            var payload = Serialize(new LocalApiEnvelope(LocalApiDefaults.Version, "event", null, null, null, null, args.Topic, state.GetSnapshot()));
+            Interlocked.Increment(ref snapshotsBuilt);
+            Interlocked.Increment(ref publishedEvents);
+            Interlocked.Add(ref publishedBytes, (long)payload.Length * interested.Length);
+            foreach (var client in interested) client.EnqueuePublication(payload);
+            RecordTelemetry("local_api_publication", new { topic = args.Topic, subscribers = interested.Length, snapshotDurationMs = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds });
+        }
+    }
+
+    private void Subscribe(Client client, IReadOnlyList<string> topics, string requestId)
+    {
+        lock (publicationGate)
+        {
+            client.ReplaceTopics(topics);
+            client.EnqueueResponse(Serialize(new LocalApiEnvelope(LocalApiDefaults.Version, "response", requestId, true, state.GetSnapshot())));
+            Interlocked.Increment(ref snapshotsBuilt);
+            UpdateTopicInterest();
+            RecordTelemetry("local_api_subscription", new { subscribers = SubscriberCounts() });
         }
     }
 
     private void OnClientClosed(Client client)
     {
-        lock (clientsGate) clients.Remove(client);
+        lock (clientsGate)
+        {
+            if (!clients.Remove(client)) return;
+        }
         connectionSlots.Release();
+        UpdateTopicInterest();
+        RecordTelemetry("local_api_client_closed", new { subscribers = SubscriberCounts() });
+    }
+
+    private void UpdateTopicInterest()
+    {
+        lock (clientsGate)
+        {
+            state.SetTopicInterest("workspace", clients.Any(client => client.IsSubscribedTo("workspace")));
+            state.SetTopicInterest("windows", clients.Any(client => client.IsSubscribedTo("windows")));
+            state.SetTopicInterest("applications", clients.Any(client => client.IsSubscribedTo("applications")));
+        }
     }
 
     private void Track(Task task, string errorMessage)
     {
         var observed = ObserveAsync(task, errorMessage);
         lock (clientsGate) backgroundTasks.Add(observed);
-        _ = observed.ContinueWith(
-            completed =>
-            {
-                lock (clientsGate) backgroundTasks.Remove(completed);
-            },
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+        _ = observed.ContinueWith(completed => { lock (clientsGate) backgroundTasks.Remove(completed); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private async Task ObserveAsync(Task task, string errorMessage)
@@ -170,152 +190,147 @@ internal sealed class LocalApiServer : IDisposable
         catch (Exception exception) { logger.Error("Falló la espera de aceptación de API local.", exception); }
     }
 
+    private static byte[] Serialize(LocalApiEnvelope envelope) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope, JsonOptions) + "\n");
+
+    private void OnQueueUpdated(int depth, bool slowClientDisconnected)
+    {
+        if (slowClientDisconnected) Interlocked.Increment(ref slowClientDisconnects);
+        while (true)
+        {
+            var previous = Volatile.Read(ref maximumQueueDepth);
+            if (depth <= previous || Interlocked.CompareExchange(ref maximumQueueDepth, depth, previous) == previous) break;
+        }
+        RecordTelemetry("local_api_queue", null);
+    }
+
+    private object SubscriberCounts()
+    {
+        lock (clientsGate)
+        {
+            return new { workspace = clients.Count(client => client.IsSubscribedTo("workspace")), windows = clients.Count(client => client.IsSubscribedTo("windows")), applications = clients.Count(client => client.IsSubscribedTo("applications")) };
+        }
+    }
+
+    private void RecordTelemetry(string eventName, object? details) => benchmarkRecorder?.RecordAtMostEverySampleInterval(eventName, new
+    {
+        details,
+        snapshots = Volatile.Read(ref snapshotsBuilt), events = Volatile.Read(ref publishedEvents), bytes = Volatile.Read(ref publishedBytes),
+        slowClientDisconnects = Volatile.Read(ref slowClientDisconnects), maximumQueueDepth = Volatile.Read(ref maximumQueueDepth)
+    });
+
     private sealed class Client : IDisposable
     {
         private readonly NamedPipeServerStream pipe;
+        private readonly long connectionId;
         private readonly ILocalApiStateProvider state;
         private readonly ILogger logger;
         private readonly Action<Client> closed;
-        private readonly SemaphoreSlim writeLock = new(1, 1);
+        private readonly Func<Stream, byte[], Task> writeClientMessage;
+        private readonly Func<Stream, Task> flushClientMessage;
+        private readonly Action<Client, IReadOnlyList<string>, string> subscribe;
+        private readonly Action<int, bool> queueUpdated;
         private readonly object topicsGate = new();
         private readonly HashSet<string> topics = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Channel<byte[]> outgoing = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(16) { SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait });
         private int isClosed;
 
-        public Client(NamedPipeServerStream pipe, ILocalApiStateProvider state, ILogger logger, Action<Client> closed)
-        {
-            this.pipe = pipe;
-            this.state = state;
-            this.logger = logger;
-            this.closed = closed;
-        }
+        public Client(long connectionId, NamedPipeServerStream pipe, ILocalApiStateProvider state, ILogger logger, Func<Stream, byte[], Task> writeClientMessage, Func<Stream, Task> flushClientMessage, Action<Client> closed, Action<Client, IReadOnlyList<string>, string> subscribe, Action<int, bool> queueUpdated)
+        { this.connectionId = connectionId; this.pipe = pipe; this.state = state; this.logger = logger; this.writeClientMessage = writeClientMessage; this.flushClientMessage = flushClientMessage; this.closed = closed; this.subscribe = subscribe; this.queueUpdated = queueUpdated; }
 
         public async Task RunAsync(CancellationToken serverToken)
         {
+            var writer = WriteLoopAsync();
             try
             {
                 using var reader = new StreamReader(pipe, new UTF8Encoding(false), false, 4096, leaveOpen: true);
                 while (!serverToken.IsCancellationRequested && pipe.IsConnected)
                 {
-                    var lineTask = reader.ReadLineAsync(serverToken).AsTask();
-                    var line = await lineTask.WaitAsync(TimeSpan.FromMilliseconds(LocalApiDefaults.OperationTimeoutMilliseconds), serverToken).ConfigureAwait(false);
+                    var line = await reader.ReadLineAsync(serverToken).AsTask().WaitAsync(TimeSpan.FromMilliseconds(LocalApiDefaults.OperationTimeoutMilliseconds), serverToken).ConfigureAwait(false);
                     if (line is null) break;
-                    if (Encoding.UTF8.GetByteCount(line) > LocalApiDefaults.MaxMessageBytes)
-                    {
-                        await SendErrorAsync(null, "message_too_large", "El mensaje supera el límite permitido.", serverToken).ConfigureAwait(false);
-                        break;
-                    }
-                    await HandleAsync(line, serverToken).ConfigureAwait(false);
+                    if (Encoding.UTF8.GetByteCount(line) > LocalApiDefaults.MaxMessageBytes) { EnqueueResponse(SerializeError(null, "message_too_large", "El mensaje supera el límite permitido.")); break; }
+                    Handle(line);
                 }
             }
             catch (OperationCanceledException) when (serverToken.IsCancellationRequested) { }
-            catch (TimeoutException)
+            catch (TimeoutException) { EnqueueResponse(SerializeError(null, "timeout", "La solicitud no se completó dentro del timeout.")); }
+            catch (Exception) when (Volatile.Read(ref isClosed) != 0) { }
+            catch (Exception exception) { logger.Error($"API local: error de lectura en la conexión {connectionId}.", exception); }
+            finally
             {
-                await SendErrorAsync(null, "timeout", "La solicitud no se completó dentro del timeout.", CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception exception)
-            {
-                logger.Error("Error en una conexión de API local.", exception);
-            }
-            finally { Dispose(); }
-        }
-
-        public async Task PublishAsync(LocalApiStateChangedEventArgs change, CancellationToken token)
-        {
-            lock (topicsGate)
-            {
-                if (!topics.Contains(change.Topic)) return;
-            }
-
-            try
-            {
-                await SendAsync(new LocalApiEnvelope(LocalApiDefaults.Version, "event", null, null, null, null, change.Topic, change.Snapshot), token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-            catch (Exception exception)
-            {
-                logger.Error("Se cerró un cliente de API local durante una publicación.", exception);
+                // Permite que una respuesta de error ya encolada llegue antes del cierre normal.
+                outgoing.Writer.TryComplete();
+                await writer.ConfigureAwait(false);
                 Dispose();
             }
         }
 
+        public bool IsSubscribedTo(string topic) { lock (topicsGate) return Volatile.Read(ref isClosed) == 0 && topics.Contains(topic); }
+        public void ReplaceTopics(IReadOnlyList<string> requested) { lock (topicsGate) { topics.Clear(); foreach (var topic in requested) topics.Add(topic); } }
+        public void EnqueuePublication(byte[] payload) => Enqueue(payload, "cola de publicaciones llena; cliente lento desconectado");
+        public void EnqueueResponse(byte[] payload) => Enqueue(payload, "cola de respuestas llena; cliente desconectado");
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref isClosed, 1) != 0) return;
+            outgoing.Writer.TryComplete();
             pipe.Dispose();
             closed(this);
         }
 
-        private async Task HandleAsync(string line, CancellationToken token)
+        private void Handle(string line)
         {
             LocalApiRequest? request;
             try { request = JsonSerializer.Deserialize<LocalApiRequest>(line, JsonOptions); }
-            catch (JsonException) { await SendErrorAsync(null, "invalid_request", "JSON inválido.", token); return; }
+            catch (JsonException) { EnqueueResponse(SerializeError(null, "invalid_request", "JSON inválido.")); return; }
             if (request is null || string.IsNullOrWhiteSpace(request.Id) || request.Version != LocalApiDefaults.Version)
-            {
-                await SendErrorAsync(request?.Id, request?.Version == LocalApiDefaults.Version ? "invalid_request" : "unsupported_version", "La solicitud no es válida para el protocolo v1.", token);
-                return;
-            }
-
-            if (request.Type.Equals("subscribe", StringComparison.OrdinalIgnoreCase))
-            {
-                lock (topicsGate)
-                {
-                    topics.Clear();
-                    foreach (var topic in request.Topics ?? Array.Empty<string>()) topics.Add(topic);
-                }
-                await SendAsync(new LocalApiEnvelope(LocalApiDefaults.Version, "response", request.Id, true, state.GetSnapshot()), token);
-                return;
-            }
-
-            if (!request.Type.Equals("request", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(request.Method))
-            {
-                await SendErrorAsync(request.Id, "invalid_request", "Se requiere type=request y method.", token);
-                return;
-            }
-
+            { EnqueueResponse(SerializeError(request?.Id, request?.Version == LocalApiDefaults.Version ? "invalid_request" : "unsupported_version", "La solicitud no es válida para el protocolo v1.")); return; }
+            if (request.Type.Equals("subscribe", StringComparison.OrdinalIgnoreCase)) { subscribe(this, request.Topics ?? Array.Empty<string>(), request.Id); return; }
+            if (!request.Type.Equals("request", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(request.Method)) { EnqueueResponse(SerializeError(request.Id, "invalid_request", "Se requiere type=request y method.")); return; }
             switch (request.Method)
             {
-                case "workspace.active.get":
-                case "workspaces.get":
-                case "applications.get":
-                case "windows.get":
-                    await SendAsync(new LocalApiEnvelope(LocalApiDefaults.Version, "response", request.Id, true, QueryResult(request.Method)), token);
-                    break;
-                case "workspace.switch":
-                    await ExecuteCommandAsync(request, ReadWorkspace(request), state.SwitchWorkspace, token);
-                    break;
-                case "window.active.move":
-                    await ExecuteCommandAsync(request, ReadWorkspace(request), state.MoveActiveWindow, token);
-                    break;
-                default:
-                    await SendErrorAsync(request.Id, "unknown_method", "Método no soportado.", token);
-                    break;
+                case "workspace.active.get": case "workspaces.get": case "applications.get": case "windows.get": EnqueueResponse(Serialize(new LocalApiEnvelope(LocalApiDefaults.Version, "response", request.Id, true, QueryResult(request.Method)))); break;
+                case "workspace.switch": ExecuteCommand(request, state.SwitchWorkspace); break;
+                case "window.active.move": ExecuteCommand(request, state.MoveActiveWindow); break;
+                default: EnqueueResponse(SerializeError(request.Id, "unknown_method", "Método no soportado.")); break;
             }
         }
 
         private object QueryResult(string method)
         {
             var snapshot = state.GetSnapshot();
-            return method switch
-            {
-                "workspace.active.get" => new { activeWorkspace = snapshot.ActiveWorkspace },
-                "workspaces.get" => snapshot.Workspaces,
-                "applications.get" => snapshot.Applications,
-                "windows.get" => snapshot.Windows,
-                _ => snapshot
-            };
+            return method switch { "workspace.active.get" => new { activeWorkspace = snapshot.ActiveWorkspace }, "workspaces.get" => snapshot.Workspaces, "applications.get" => snapshot.Applications, "windows.get" => snapshot.Windows, _ => snapshot };
         }
 
-        private async Task ExecuteCommandAsync(LocalApiRequest request, int? workspace, Func<int, LocalApiResult> command, CancellationToken token)
+        private void ExecuteCommand(LocalApiRequest request, Func<int, LocalApiResult> command)
         {
-            if (!workspace.HasValue)
-            {
-                await SendErrorAsync(request.Id, "invalid_request", "params.workspace debe ser un entero entre 1 y 9.", token);
-                return;
-            }
+            var workspace = ReadWorkspace(request);
+            if (!workspace.HasValue) { EnqueueResponse(SerializeError(request.Id, "invalid_request", "params.workspace debe ser un entero entre 1 y 9.")); return; }
             var result = command(workspace.Value);
-            if (result.Succeeded) await SendAsync(new LocalApiEnvelope(LocalApiDefaults.Version, "response", request.Id, true, new { succeeded = true }), token);
-            else await SendErrorAsync(request.Id, result.ErrorCode ?? "internal_error", result.ErrorMessage ?? "La operación falló.", token);
+            EnqueueResponse(result.Succeeded ? Serialize(new LocalApiEnvelope(LocalApiDefaults.Version, "response", request.Id, true, new { succeeded = true })) : SerializeError(request.Id, result.ErrorCode ?? "internal_error", result.ErrorMessage ?? "La operación falló."));
+        }
+
+        private void Enqueue(byte[] payload, string reason)
+        {
+            if (payload.Length > LocalApiDefaults.MaxMessageBytes || Volatile.Read(ref isClosed) != 0) return;
+            if (!outgoing.Writer.TryWrite(payload)) { logger.Error($"API local: {reason}."); queueUpdated(outgoing.Reader.Count, true); Dispose(); return; }
+            queueUpdated(outgoing.Reader.Count, false);
+        }
+
+        private async Task WriteLoopAsync()
+        {
+            var operation = "WriteAsync";
+            try
+            {
+                await foreach (var bytes in outgoing.Reader.ReadAllAsync().ConfigureAwait(false))
+                {
+                    operation = "WriteAsync";
+                    await writeClientMessage(pipe, bytes).ConfigureAwait(false);
+                    operation = "FlushAsync";
+                    await flushClientMessage(pipe).ConfigureAwait(false);
+                }
+            }
+            catch (Exception) when (Volatile.Read(ref isClosed) != 0) { }
+            catch (Exception exception) { logger.Error($"API local: falló {operation} del escritor en la conexión {connectionId}.", exception); Dispose(); }
         }
 
         private static int? ReadWorkspace(LocalApiRequest request)
@@ -325,22 +340,6 @@ internal sealed class LocalApiServer : IDisposable
             return value is int numberValue && numberValue is >= 1 and <= 9 ? numberValue : null;
         }
 
-        private Task SendErrorAsync(string? id, string code, string message, CancellationToken token) =>
-            SendAsync(new LocalApiEnvelope(LocalApiDefaults.Version, "response", id, false, null, new LocalApiError(code, message)), token);
-
-        private async Task SendAsync(LocalApiEnvelope envelope, CancellationToken token)
-        {
-            if (Volatile.Read(ref isClosed) != 0) return;
-            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope, JsonOptions) + "\n");
-            if (bytes.Length > LocalApiDefaults.MaxMessageBytes) return;
-            await writeLock.WaitAsync(token).ConfigureAwait(false);
-            try
-            {
-                if (Volatile.Read(ref isClosed) != 0) return;
-                await pipe.WriteAsync(bytes, token).ConfigureAwait(false);
-                await pipe.FlushAsync(token).ConfigureAwait(false);
-            }
-            finally { writeLock.Release(); }
-        }
+        private static byte[] SerializeError(string? id, string code, string message) => Serialize(new LocalApiEnvelope(LocalApiDefaults.Version, "response", id, false, null, new LocalApiError(code, message)));
     }
 }

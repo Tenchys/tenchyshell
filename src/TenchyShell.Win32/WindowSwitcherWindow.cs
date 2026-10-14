@@ -29,6 +29,7 @@ public sealed class WindowSwitcherWindow : IDisposable
     private IntPtr previousForegroundWindow;
     private ushort windowClassAtom;
     private WindowSwitcherState state = new(Array.Empty<WindowSwitcherItem>());
+    private WorkspaceOperationSnapshot? operationSnapshot;
     private bool isVisible;
     private bool isDisposed;
 
@@ -83,9 +84,10 @@ public sealed class WindowSwitcherWindow : IDisposable
     public void Show()
     {
         ObjectDisposedException.ThrowIf(isDisposed, this);
-        workspaceSource.Refresh();
-        var workspaceItems = workspaceSource.GetCurrentWorkspaceWindows()
-            .Select(handle => new WindowSwitcherItem(handle, windowService.GetWindowTitle(handle)))
+        operationSnapshot = workspaceSource.CaptureCurrentWorkspaceSnapshot("selector");
+        var workspaceItems = operationSnapshot.CurrentWindows
+            .Where(snapshot => snapshot.Exists)
+            .Select(snapshot => new WindowSwitcherItem(snapshot.Handle, snapshot.Title))
             .ToArray();
         focusRestrictionCache.Reconcile(workspaceItems);
         state = new WindowSwitcherState(workspaceItems
@@ -128,6 +130,7 @@ public sealed class WindowSwitcherWindow : IDisposable
 
         NativeMethods.ShowWindow(windowHandle, NativeMethods.SW_HIDE);
         isVisible = false;
+        operationSnapshot = null;
 
         if (restorePreviousFocus && previousForegroundWindow != IntPtr.Zero)
         {
@@ -293,6 +296,22 @@ public sealed class WindowSwitcherWindow : IDisposable
         }
 
         var foregroundBefore = windowService.GetForegroundWindow();
+        var expectedSnapshot = operationSnapshot?.CurrentWindows.FirstOrDefault(item => item.Handle == selected.Handle);
+        if (expectedSnapshot is null)
+        {
+            expectedSnapshot = new TenchyShell.Core.Windows.WorkspaceWindowSnapshot(
+                selected.Handle,
+                new WorkspaceWindowMetadata(true, true, false, selected.Title, true));
+        }
+        if (expectedSnapshot.Value.Handle == IntPtr.Zero || !windowService.RevalidateWindow(expectedSnapshot.Value))
+        {
+            operationSnapshot?.Capture?.RecordRevalidationFailure();
+            stabilityMetrics?.RecordFocus(WorkspaceFocusResult.Failed(WorkspaceFocusFailure.InvalidWindow));
+            logger?.Error($"El selector descartó HWND {selected.Handle} porque dejó de ser válido antes de enfocarlo.");
+            Hide(restorePreviousFocus: true);
+            return;
+        }
+
         var stopwatch = Stopwatch.StartNew();
         // El selector todavía posee el foreground aquí. Ocultarlo antes de esta
         // llamada permite a Windows devolver el foco a la ventana anterior y

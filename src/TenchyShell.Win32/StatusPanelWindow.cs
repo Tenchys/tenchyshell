@@ -3,6 +3,7 @@ using TenchyShell.Core.Configuration;
 using TenchyShell.Core.Session;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.StatusPanel;
+using TenchyShell.Core.Diagnostics;
 
 namespace TenchyShell.Win32;
 
@@ -16,7 +17,6 @@ public sealed class StatusPanelWindow : IDisposable
     private const uint WS_EX_NOACTIVATE = 0x08000000;
     private const uint WS_POPUP = 0x80000000;
     private const nuint TimerId = 1;
-    private const uint TimerIntervalMilliseconds = 250;
     private static readonly TimeSpan WorkspaceAnnouncementDuration = TimeSpan.FromSeconds(1.5);
 
     private readonly StatusPanelConfiguration configuration;
@@ -25,6 +25,7 @@ public sealed class StatusPanelWindow : IDisposable
     private readonly bool customDockConfigured;
     private readonly ILogger logger;
     private readonly DesktopAreaPolicy desktopAreaPolicy;
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
     private readonly NativeMethods.WindowProc windowProcedure;
     private readonly StatusPanelState content = new();
     private readonly StatusPanelClockState clock = new();
@@ -34,15 +35,17 @@ public sealed class StatusPanelWindow : IDisposable
     private IntPtr windowHandle;
     private ushort windowClassAtom;
     private bool timerStarted;
+    private uint timerIntervalMilliseconds;
     private bool isDisposed;
     private NativeMethods.Rect? cachedWorkArea;
     private StatusPanelRectangle? panelBounds;
 
-    public StatusPanelWindow(StatusPanelConfiguration configuration, ILogger logger, DesktopAreaPolicy? desktopAreaPolicy = null, DockConfiguration? dockConfiguration = null)
+    public StatusPanelWindow(StatusPanelConfiguration configuration, ILogger logger, DesktopAreaPolicy? desktopAreaPolicy = null, DockConfiguration? dockConfiguration = null, LiveBenchmarkRecorder? benchmarkRecorder = null)
     {
         this.configuration = configuration;
         this.logger = logger;
         this.desktopAreaPolicy = desktopAreaPolicy ?? new DesktopAreaPolicy();
+        this.benchmarkRecorder = benchmarkRecorder?.IsEnabled == true ? benchmarkRecorder : null;
         customDockConfigured = dockConfiguration is not null;
         this.dockConfiguration = dockConfiguration ?? DockConfiguration.CreateDefault();
         dockNavigation = DockNavigationState.FromConfiguration(this.dockConfiguration);
@@ -80,7 +83,7 @@ public sealed class StatusPanelWindow : IDisposable
 
             if (!timerStarted)
             {
-                var timer = NativeMethods.SetTimer(windowHandle, TimerId, TimerIntervalMilliseconds, IntPtr.Zero);
+                var timer = NativeMethods.SetTimer(windowHandle, TimerId, StatusPanelTimerPolicy.GetIntervalMilliseconds(visibility.IsVisible), IntPtr.Zero);
                 if (timer == 0)
                 {
                     logger.Error($"No se pudo iniciar el timer del panel informativo. Código Win32: {Marshal.GetLastWin32Error()}.");
@@ -88,6 +91,7 @@ public sealed class StatusPanelWindow : IDisposable
                 else
                 {
                     timerStarted = true;
+                    timerIntervalMilliseconds = StatusPanelTimerPolicy.GetIntervalMilliseconds(visibility.IsVisible);
                 }
             }
         });
@@ -112,6 +116,7 @@ public sealed class StatusPanelWindow : IDisposable
 
             visibility.ShowWorkspaceAnnouncement(DateTimeOffset.UtcNow, WorkspaceAnnouncementDuration);
             Invalidate();
+            UpdateTimerCadence();
         });
     }
 
@@ -187,6 +192,7 @@ public sealed class StatusPanelWindow : IDisposable
         }
 
         Invalidate();
+        UpdateTimerCadence();
     }
 
     private bool ShowWindowAtDock()
@@ -223,8 +229,7 @@ public sealed class StatusPanelWindow : IDisposable
     private int GetDockHeight()
     {
         if (!customDockConfigured || !dockConfiguration.Enabled) return configuration.Height;
-        var rows = dockNavigation.Categories.Sum(category => 1 + Math.Max(1, category.Items.Count));
-        return Math.Max(configuration.Height, 78 + rows * 19);
+        return DockLayoutMetrics.GetDockHeight(configuration.Height, dockNavigation.Categories);
     }
 
     private void Hide()
@@ -235,14 +240,21 @@ public sealed class StatusPanelWindow : IDisposable
         {
             NativeMethods.ShowWindow(windowHandle, NativeMethods.SW_HIDE);
         }
+        UpdateTimerCadence();
     }
 
     private void OnTimer()
     {
+        benchmarkRecorder?.RecordAtMostEverySampleInterval("status_panel_timer", new
+        {
+            visible = visibility.IsVisible,
+            intervalMilliseconds = timerIntervalMilliseconds
+        });
         if (!visibility.IsVisible)
         {
             if (IsPointerAtLeftEdge())
             {
+                benchmarkRecorder?.RecordAtMostEverySampleInterval("status_panel_reveal", new { source = "edge" });
                 Show(pinnedByHotkey: false);
             }
 
@@ -259,6 +271,21 @@ public sealed class StatusPanelWindow : IDisposable
         {
             Invalidate();
         }
+    }
+
+    private void UpdateTimerCadence()
+    {
+        if (!timerStarted || windowHandle == IntPtr.Zero) return;
+        var interval = StatusPanelTimerPolicy.GetIntervalMilliseconds(visibility.IsVisible);
+        if (interval == timerIntervalMilliseconds) return;
+        var timer = NativeMethods.SetTimer(windowHandle, TimerId, interval, IntPtr.Zero);
+        if (timer == 0)
+        {
+            logger.Error($"No se pudo actualizar la cadencia del timer del panel. Código Win32: {Marshal.GetLastWin32Error()}.");
+            return;
+        }
+        timerIntervalMilliseconds = interval;
+        benchmarkRecorder?.RecordAtMostEverySampleInterval("status_panel_timer_cadence", new { visible = visibility.IsVisible, intervalMilliseconds = interval });
     }
 
     private bool IsPointerAtLeftEdge()
@@ -482,36 +509,66 @@ public sealed class StatusPanelWindow : IDisposable
             if (!string.IsNullOrWhiteSpace(sessionConfirmationText))
             {
                 NativeMethods.SetTextColor(deviceContext, 0x0000D0FF);
-                NativeMethods.TextOut(deviceContext, 18, 70, sessionConfirmationText, sessionConfirmationText.Length);
+                NativeMethods.TextOut(deviceContext, DockLayoutMetrics.TextLeft, DockLayoutMetrics.ConfirmationTextTop, sessionConfirmationText, sessionConfirmationText.Length);
             }
             if (customDockConfigured && dockConfiguration.Enabled)
             {
-                var y = string.IsNullOrWhiteSpace(sessionConfirmationText) ? 76 : 95;
-                foreach (var category in dockNavigation.Categories)
-                {
-                    var categoryLabel = $"[{category.Title}]";
-                    NativeMethods.SetTextColor(deviceContext, 0x00A0D0FF);
-                    NativeMethods.TextOut(deviceContext, 18, y, categoryLabel, categoryLabel.Length);
-                    y += 19;
-                    if (!dockNavigation.Expanded)
-                        continue;
-                    if (category.Items.Count == 0)
-                    {
-                        const string empty = "  (vacío)";
-                        NativeMethods.SetTextColor(deviceContext, 0x00808080);
-                        NativeMethods.TextOut(deviceContext, 18, y, empty, empty.Length);
-                        y += 19;
-                        continue;
-                    }
+                var dockFont = NativeMethods.CreateFont(
+                    -DockLayoutMetrics.TextFontHeight,
+                    0,
+                    0,
+                    0,
+                    400,
+                    0,
+                    0,
+                    0,
+                    NativeMethods.DEFAULT_CHARSET,
+                    NativeMethods.OUT_DEFAULT_PRECIS,
+                    NativeMethods.CLIP_DEFAULT_PRECIS,
+                    NativeMethods.CLEARTYPE_QUALITY,
+                    NativeMethods.DEFAULT_PITCH | NativeMethods.FF_DONTCARE,
+                    "Segoe UI");
+                var previousDockFont = dockFont == IntPtr.Zero
+                    ? IntPtr.Zero
+                    : NativeMethods.SelectObject(deviceContext, dockFont);
 
-                    foreach (var item in category.Items)
+                try
+                {
+                    var y = DockLayoutMetrics.FirstRowTop;
+                    foreach (var category in dockNavigation.Categories)
                     {
-                        var selected = ReferenceEquals(category, dockNavigation.SelectedCategory) &&
-                                       ReferenceEquals(item, dockNavigation.SelectedItem);
-                        var label = $"{(selected ? ">" : " ")} {item.Title}";
-                        NativeMethods.SetTextColor(deviceContext, selected ? 0x00FFFFFFu : 0x00D0D0D0u);
-                        NativeMethods.TextOut(deviceContext, 18, y, label, label.Length);
-                        y += 19;
+                        var categoryLabel = $"[{category.Title}]";
+                        NativeMethods.SetTextColor(deviceContext, 0x00A0D0FF);
+                        NativeMethods.TextOut(deviceContext, DockLayoutMetrics.TextLeft, y, categoryLabel, categoryLabel.Length);
+                        y += DockLayoutMetrics.RowHeight;
+                        if (!dockNavigation.Expanded)
+                            continue;
+                        if (category.Items.Count == 0)
+                        {
+                            const string empty = "  (vacío)";
+                            NativeMethods.SetTextColor(deviceContext, 0x00808080);
+                            NativeMethods.TextOut(deviceContext, DockLayoutMetrics.TextLeft, y, empty, empty.Length);
+                            y += DockLayoutMetrics.RowHeight;
+                            continue;
+                        }
+
+                        foreach (var item in category.Items)
+                        {
+                            var selected = ReferenceEquals(category, dockNavigation.SelectedCategory) &&
+                                           ReferenceEquals(item, dockNavigation.SelectedItem);
+                            var label = $"{(selected ? ">" : " ")} {item.Title}";
+                            NativeMethods.SetTextColor(deviceContext, selected ? 0x00FFFFFFu : 0x00D0D0D0u);
+                            NativeMethods.TextOut(deviceContext, DockLayoutMetrics.TextLeft, y, label, label.Length);
+                            y += DockLayoutMetrics.RowHeight;
+                        }
+                    }
+                }
+                finally
+                {
+                    if (dockFont != IntPtr.Zero)
+                    {
+                        NativeMethods.SelectObject(deviceContext, previousDockFont);
+                        NativeMethods.DeleteObject(dockFont);
                     }
                 }
             }
@@ -519,7 +576,7 @@ public sealed class StatusPanelWindow : IDisposable
             {
                 const string trayHint = "Click: bandeja";
                 NativeMethods.SetTextColor(deviceContext, 0x00A0A0A0);
-                NativeMethods.TextOut(deviceContext, 18, 77, trayHint, trayHint.Length);
+                NativeMethods.TextOut(deviceContext, DockLayoutMetrics.TextLeft, DockLayoutMetrics.FirstRowTop, trayHint, trayHint.Length);
             }
         }
         finally

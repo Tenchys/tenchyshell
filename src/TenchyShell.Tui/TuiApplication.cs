@@ -3,6 +3,7 @@ using TenchyShell.Core.Yazi;
 using TenchyShell.Core.Logging;
 using TenchyShell.Core.Runtime;
 using TenchyShell.Core.LocalApi;
+using TenchyShell.Core.Diagnostics;
 
 namespace TenchyShell.Tui;
 
@@ -17,6 +18,7 @@ public sealed class TuiApplication
     private readonly TextReader input;
     private readonly TextWriter output;
     private readonly IWidgetCommandRunner commandRunner;
+    private readonly LiveBenchmarkRecorder? benchmarkRecorder;
     private readonly Dictionary<string, WidgetState> widgetStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Task> pendingUpdates = new();
     private readonly List<Timer> updateTimers = new();
@@ -52,7 +54,8 @@ public sealed class TuiApplication
         Func<YaziShortcutReadResult>? yaziReader = null,
         Func<int>? widthProvider = null,
         Func<int>? heightProvider = null,
-        Func<string?>? telemetryScriptPathResolver = null)
+        Func<string?>? telemetryScriptPathResolver = null,
+        LiveBenchmarkRecorder? benchmarkRecorder = null)
     {
         this.configuration = configuration;
         this.configurationErrors = configurationErrors;
@@ -60,7 +63,8 @@ public sealed class TuiApplication
         this.logger = logger;
         this.input = input ?? Console.In;
         this.output = output ?? Console.Out;
-        this.commandRunner = commandRunner ?? new ExternalWidgetCommandRunner();
+        this.commandRunner = commandRunner ?? new BenchmarkingWidgetCommandRunner(new ExternalWidgetCommandRunner(), benchmarkRecorder);
+        this.benchmarkRecorder = benchmarkRecorder;
         this.apiClientFactory = apiClientFactory ?? (() => new NamedPipeLocalApiClient());
         this.yaziReader = yaziReader ?? (() => new YaziShortcutReader().Read());
         this.widthProvider = widthProvider ?? GetWidth;
@@ -118,11 +122,25 @@ public sealed class TuiApplication
                 logger.Info($"La TUI no encontró '{configurationPath}'; muestra valores incorporados.");
             }
 
-            return new TuiApplication(
+            if (logger is FileLogger fileLogger)
+            {
+                fileLogger.MetricsEnabled = loaded.Configuration.Benchmark.Enabled;
+            }
+            using var benchmarkRecorder = new LiveBenchmarkRecorder(loaded.Configuration.Benchmark, logger);
+            benchmarkRecorder.Start();
+            var application = new TuiApplication(
                 loaded.Configuration,
                 loaded.Errors,
                 configurationPath,
-                logger).RunInteractive();
+                logger,
+                benchmarkRecorder: benchmarkRecorder);
+            var exitCode = application.RunInteractive();
+            if (logger is FileLogger fileLoggerMetrics && fileLoggerMetrics.MetricsEnabled)
+            {
+                benchmarkRecorder.RecordFileLoggerMetrics(fileLoggerMetrics.GetMetricsSnapshot());
+            }
+
+            return exitCode;
         }
         catch (Exception exception)
         {
@@ -276,7 +294,12 @@ public sealed class TuiApplication
     {
         lock (updateSync)
         {
-            if (state.Pending || cancellation.IsCancellationRequested) return;
+            if (state.Pending)
+            {
+                benchmarkRecorder?.RecordPeriodicExecutionMetrics(PeriodicExecutionMetrics.OverlapAvoided("tui"));
+                return;
+            }
+            if (cancellation.IsCancellationRequested) return;
             state.Pending = true;
             var task = Task.Run(() => RefreshAsync(state), CancellationToken.None);
             pendingUpdates.Add(task);

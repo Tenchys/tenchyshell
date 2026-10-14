@@ -1,34 +1,52 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using TenchyShell.Core.Applications;
 
 namespace TenchyShell.Win32;
 
-public sealed class WindowsApplicationCatalog : IApplicationCatalog
+public sealed class WindowsApplicationCatalog : IRefreshableApplicationCatalog
 {
     private ApplicationSearchCatalog? catalog;
+
+    public event EventHandler<ApplicationCatalogRefreshMetrics>? Refreshed;
 
     public IReadOnlyList<ApplicationEntry> GetAll() => GetCatalog().GetAll();
 
     public IReadOnlyList<ApplicationEntry> Search(string query) => GetCatalog().Search(query);
 
     public void Refresh()
+        => Refresh("refresh");
+
+    public void Refresh(string source)
     {
-        catalog = new ApplicationSearchCatalog(DiscoverApplications());
+        var startedAt = Stopwatch.GetTimestamp();
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var shellAttempts = 0;
+        var shellFailures = 0;
+        var startMenu = DiscoverStartMenuShortcuts().ToArray();
+        var comStartedAt = Stopwatch.GetTimestamp();
+        var shell = DiscoverShellApplications(ref shellAttempts, ref shellFailures);
+        var all = startMenu.Concat(shell).ToArray();
+        catalog = new ApplicationSearchCatalog(all);
+        Refreshed?.Invoke(this, new ApplicationCatalogRefreshMetrics(
+            string.IsNullOrWhiteSpace(source) ? "refresh" : source,
+            startMenu.Length,
+            shell.Count,
+            catalog.GetAll().Count,
+            shellAttempts,
+            shellFailures,
+            Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+            Stopwatch.GetElapsedTime(comStartedAt).TotalMilliseconds,
+            GC.GetAllocatedBytesForCurrentThread() - allocatedBefore));
     }
 
-    private ApplicationSearchCatalog GetCatalog() => catalog ??= new ApplicationSearchCatalog(DiscoverApplications());
-
-    private static IEnumerable<ApplicationEntry> DiscoverApplications()
+    private ApplicationSearchCatalog GetCatalog()
     {
-        foreach (var entry in DiscoverStartMenuShortcuts())
+        if (catalog is null)
         {
-            yield return entry;
+            Refresh();
         }
-
-        foreach (var entry in DiscoverShellApplications())
-        {
-            yield return entry;
-        }
+        return catalog!;
     }
 
     private static IEnumerable<ApplicationEntry> DiscoverStartMenuShortcuts()
@@ -80,8 +98,9 @@ public sealed class WindowsApplicationCatalog : IApplicationCatalog
         }
     }
 
-    private static IEnumerable<ApplicationEntry> DiscoverShellApplications()
+    private static List<ApplicationEntry> DiscoverShellApplications(ref int attempts, ref int failures)
     {
+        attempts++;
         var applications = new List<ApplicationEntry>();
         object? shell = null;
         object? folder = null;
@@ -143,6 +162,7 @@ public sealed class WindowsApplicationCatalog : IApplicationCatalog
         }
         catch
         {
+            failures++;
             // Shell enumeration is optional; Start Menu shortcuts remain available if it fails.
         }
         finally
