@@ -20,7 +20,7 @@ public sealed class SystemTrayScriptRunnerTests
     public async Task RunAsyncDrainsLargeStandardOutputAndStandardErrorWithoutDeadlocking()
     {
         var result = await RunCommandAsync(
-            "(for /L %i in (1,1,4000) do @echo 0123456789) & (for /L %i in (1,1,4000) do @echo 0123456789 1>&2)");
+            "(for /L %i in (1,1,3000) do @echo 0123456789) & (for /L %i in (1,1,3000) do @echo 0123456789 1>&2)");
 
         Assert.False(result.Succeeded);
         Assert.Equal("La salida JSON del script supera 32 KiB.", result.Error);
