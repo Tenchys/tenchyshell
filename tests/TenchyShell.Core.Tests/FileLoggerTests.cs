@@ -189,7 +189,7 @@ public sealed class FileLoggerTests
             try
             {
                 write = Task.Run(() => logger.Info("contended"));
-                Thread.Sleep(25);
+                Thread.Sleep(500);
             }
             finally
             {
