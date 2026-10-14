@@ -171,7 +171,7 @@ public sealed class FileLoggerTests
     }
 
     [Fact]
-    public async Task RecordsContentionWithoutBlockingTheWriterForever()
+    public void RecordsContentionWithoutBlockingTheWriterForever()
     {
         var directory = CreateTemporaryDirectory();
         try
@@ -181,14 +181,16 @@ public sealed class FileLoggerTests
                 .GetField("syncRoot", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .GetValue(logger)!;
             Monitor.Enter(syncRoot);
-            Task? write = null;
+            Thread? write = null;
 
             // Give the worker a chance to reach the logger lock while the
-            // test owns it. The bounded wait keeps this independent of I/O
-            // speed and the lock is always released in finally.
+            // test owns it. Using an OS thread instead of the thread pool
+            // avoids CI failures when managed worker tasks are scheduled
+            // after the lock is already released.
             try
             {
-                write = Task.Run(() => logger.Info("contended"));
+                write = new Thread(() => logger.Info("contended"));
+                write.Start();
                 Thread.Sleep(500);
             }
             finally
@@ -197,7 +199,7 @@ public sealed class FileLoggerTests
             }
 
             Assert.NotNull(write);
-            await write!.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(write.Join(TimeSpan.FromSeconds(5)));
             Assert.Equal(1, logger.GetMetricsSnapshot().LogCalls);
             Assert.Equal(1, logger.GetMetricsSnapshot().ContentionCount);
         }
